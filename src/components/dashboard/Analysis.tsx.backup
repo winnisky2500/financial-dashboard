@@ -1,0 +1,363 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { useLocation, useSearchParams } from 'react-router-dom';
+import { Send, Bot, User, RefreshCw, MessageCircle, BarChart3, TrendingUp, Search, AlertTriangle, Sparkles, Copy, Download, ExternalLink } from 'lucide-react';
+import { queryFinancialAnalysisAgent, getAnalysisModes, type ChatMessage, type AnalysisQuery, type AIAnalysisResult } from '@/lib/dataService';
+import { Markdown } from '@/components/ui/Markdown';
+import toast from 'react-hot-toast';
+import { Chart as ChartJS, ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, Title, LineElement, PointElement } from 'chart.js';
+import { Pie, Bar, Line } from 'react-chartjs-2';
+
+ChartJS.register(ArcElement, Tooltip, Legend, CategoryScale, LinearScale, BarElement, Title, LineElement, PointElement);
+
+const FinancialAnalysis: React.FC = () => {
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [inputQuery, setInputQuery] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [selectedMode, setSelectedMode] = useState<'dimension' | 'metric' | 'business' | 'anomaly'>('metric');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const analysisMode = getAnalysisModes();
+
+  const modeIcons = {
+    dimension: BarChart3,
+    metric: TrendingUp,
+    business: Search,
+    anomaly: AlertTriangle
+  };
+
+  // 初始化欢迎消息
+  useEffect(() => {
+    const welcomeMessage: ChatMessage = {
+      role: 'assistant',
+      content: `你好！我是AI财务分析助手，可以帮你进行智能的财务数据分析。
+
+现在正在使用**${analysisMode.find(m => m.id === selectedMode)?.name}**模式。你可以问我：
+
+- “请分析本季度的收入表现”
+- “哪些产品线利润率最高？”  
+- “成本结构有什么优化空间？”
+
+请问有什么需要分析的财务问题吗？`,
+      timestamp: new Date().toISOString()
+    };
+    
+    setMessages([welcomeMessage]);
+  }, [selectedMode]);
+
+  // 处理URL参数中的自动问题
+  useEffect(() => {
+    const indicator = searchParams.get('indicator');
+    const question = searchParams.get('question');
+    const mode = searchParams.get('mode');
+    
+    if (mode && ['dimension', 'metric', 'business', 'anomaly'].includes(mode)) {
+      setSelectedMode(mode as 'dimension' | 'metric' | 'business' | 'anomaly');
+    }
+    
+    if (question) {
+      const autoQuery = indicator ? `关于${indicator}的问题：${question}` : question;
+      setTimeout(() => {
+        handleSendMessage(autoQuery);
+      }, 1000);
+    }
+  }, [searchParams]);
+
+  // 自动滚动到底部
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const handleSendMessage = async (query?: string) => {
+    const messageText = query || inputQuery.trim();
+    if (!messageText) {
+      toast.error('请输入问题');
+      return;
+    }
+
+    // 添加用户消息
+    const userMessage: ChatMessage = {
+      role: 'user',
+      content: messageText,
+      timestamp: new Date().toISOString()
+    };
+
+    const newMessages = [...messages, userMessage];
+    setMessages(newMessages);
+    setInputQuery('');
+    setLoading(true);
+
+    try {
+      // 准备对话历史（只保留最近的5轮对话）
+      const recentMessages = newMessages.slice(-10).filter(m => m.role !== 'assistant' || !m.content.includes('你好！我是AI财务分析助手'));
+      
+      const analysisQuery: AnalysisQuery = {
+        query: messageText,
+        analysisMode: selectedMode,
+        contextData: {
+          timestamp: new Date().toISOString(),
+          sessionId: Date.now().toString()
+        },
+        chatHistory: recentMessages
+      };
+
+      const result: AIAnalysisResult = await queryFinancialAnalysisAgent(analysisQuery);
+      
+      // 添加AI响应
+      const aiMessage: ChatMessage = {
+        role: 'assistant',
+        content: formatAIResponse(result.response),
+        timestamp: result.timestamp
+      };
+
+      setMessages(prev => [...prev, aiMessage]);
+      toast.success('分析完成');
+
+    } catch (error) {
+      console.error('AI分析失败:', error);
+      
+      const errorMessage: ChatMessage = {
+        role: 'assistant',
+        content: '抱歉，分析过程中发生了错误。请稍后重试或者换个问题试试。',
+        timestamp: new Date().toISOString()
+      };
+      
+      setMessages(prev => [...prev, errorMessage]);
+      toast.error('分析失败，请稍后重试');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const formatAIResponse = (response: any) => {
+    let formattedContent = `## 📊 分析结果\n\n${response.analysis}\n\n`;
+    
+    if (response.insights && response.insights.length > 0) {
+      formattedContent += `### 💡 关键洞察\n\n`;
+      response.insights.forEach((insight: string, index: number) => {
+        formattedContent += `${index + 1}. ${insight}\n`;
+      });
+      formattedContent += '\n';
+    }
+    
+    if (response.recommendations && response.recommendations.length > 0) {
+      formattedContent += `### ✨ 建议与建议\n\n`;
+      response.recommendations.forEach((rec: string, index: number) => {
+        formattedContent += `${index + 1}. ${rec}\n`;
+      });
+      formattedContent += '\n';
+    }
+    
+    if (response.chartSuggestions && response.chartSuggestions.length > 0) {
+      formattedContent += `### 📈 建议图表\n\n`;
+      response.chartSuggestions.forEach((chart: any, index: number) => {
+        formattedContent += `**${chart.title}** (${chart.type.toUpperCase()})\n${chart.description}\n数据来源：${chart.dataSource}\n\n`;
+      });
+    }
+    
+    if (response.followUpQuestions && response.followUpQuestions.length > 0) {
+      formattedContent += `### 🤔 你可能还想问\n\n`;
+      response.followUpQuestions.forEach((question: string, index: number) => {
+        formattedContent += `- ${question}\n`;
+      });
+    }
+    
+    return formattedContent;
+  };
+
+  const handleModeChange = (mode: 'dimension' | 'metric' | 'business' | 'anomaly') => {
+    setSelectedMode(mode);
+    // 重新初始化欢迎消息
+    const welcomeMessage: ChatMessage = {
+      role: 'assistant',
+      content: `已切换到**${analysisMode.find(m => m.id === mode)?.name}**模式。\n\n${analysisMode.find(m => m.id === mode)?.description}\n\n请问有什么需要分析的财务问题吗？`,
+      timestamp: new Date().toISOString()
+    };
+    setMessages([welcomeMessage]);
+  };
+
+  const clearHistory = () => {
+    const welcomeMessage: ChatMessage = {
+      role: 'assistant',
+      content: `对话历史已清空。现在正在使用**${analysisMode.find(m => m.id === selectedMode)?.name}**模式。\n\n请问有什么需要分析的财务问题吗？`,
+      timestamp: new Date().toISOString()
+    };
+    setMessages([welcomeMessage]);
+    toast.success('对话历史已清空');
+  };
+
+  return (
+    <div className="h-full flex flex-col bg-gray-50">
+      {/* 头部 */}
+      <div className="bg-white border-b border-gray-200 px-6 py-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <div className="flex items-center justify-center w-10 h-10 rounded-full bg-blue-100">
+              <Bot className="h-6 w-6 text-blue-600" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">财务智能分析</h1>
+              <p className="text-sm text-gray-500">AI驱动的对话式财务分析助手</p>
+            </div>
+          </div>
+          
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={clearHistory}
+              className="inline-flex items-center px-3 py-1.5 border border-gray-300 shadow-sm text-sm leading-4 font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            >
+              <RefreshCw className="h-4 w-4 mr-1" />
+              清空对话
+            </button>
+          </div>
+        </div>
+        
+        {/* 分析模式选择 */}
+        <div className="mt-4">
+          <div className="flex items-center space-x-1 bg-gray-100 p-1 rounded-lg">
+            {analysisMode.map((mode) => {
+              const IconComponent = modeIcons[mode.id];
+              return (
+                <button
+                  key={mode.id}
+                  onClick={() => handleModeChange(mode.id)}
+                  className={`
+                    flex-1 flex items-center justify-center px-3 py-2 rounded-md text-sm font-medium transition-colors
+                    ${selectedMode === mode.id 
+                      ? 'bg-white text-blue-600 shadow-sm' 
+                      : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+                    }
+                  `}
+                  title={mode.description}
+                >
+                  <IconComponent className="h-4 w-4 mr-2" />
+                  {mode.name}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* 消息列表 */}
+      <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+        {messages.map((message, index) => (
+          <div key={index} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`flex items-start space-x-3 max-w-4xl ${message.role === 'user' ? 'flex-row-reverse space-x-reverse' : ''}`}>
+              {/* 头像 */}
+              <div className={`flex items-center justify-center w-8 h-8 rounded-full ${
+                message.role === 'user' 
+                  ? 'bg-blue-500' 
+                  : 'bg-gray-200'
+              }`}>
+                {message.role === 'user' ? (
+                  <User className="h-5 w-5 text-white" />
+                ) : (
+                  <Bot className="h-5 w-5 text-gray-600" />
+                )}
+              </div>
+              
+              {/* 消息内容 */}
+              <div className={`
+                px-4 py-3 rounded-lg max-w-full
+                ${message.role === 'user' 
+                  ? 'bg-blue-500 text-white' 
+                  : 'bg-white border border-gray-200 text-gray-900'
+                }
+              `}>
+                {message.role === 'user' ? (
+                  <p className="whitespace-pre-wrap">{message.content}</p>
+                ) : (
+                  <div className="prose prose-sm max-w-none">
+                    <Markdown content={message.content} />
+                  </div>
+                )}
+                
+                {/* 时间戳 */}
+                {message.timestamp && (
+                  <p className={`text-xs mt-2 ${
+                    message.role === 'user' ? 'text-blue-200' : 'text-gray-400'
+                  }`}>
+                    {new Date(message.timestamp).toLocaleTimeString()}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+        
+        {/* 加载指示器 */}
+        {loading && (
+          <div className="flex justify-start">
+            <div className="flex items-start space-x-3 max-w-4xl">
+              <div className="flex items-center justify-center w-8 h-8 rounded-full bg-gray-200">
+                <Bot className="h-5 w-5 text-gray-600" />
+              </div>
+              <div className="bg-white border border-gray-200 px-4 py-3 rounded-lg">
+                <div className="flex items-center space-x-2">
+                  <RefreshCw className="h-4 w-4 text-gray-400 animate-spin" />
+                  <span className="text-sm text-gray-500">正在分析中...</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* 输入区域 */}
+      <div className="bg-white border-t border-gray-200 px-6 py-4">
+        <div className="flex items-center space-x-3">
+          <div className="flex-1 relative">
+            <input
+              type="text"
+              value={inputQuery}
+              onChange={(e) => setInputQuery(e.target.value)}
+              placeholder={`在${analysisMode.find(m => m.id === selectedMode)?.name}模式下输入您的问题...`}
+              className="block w-full px-4 py-3 pr-12 border border-gray-300 rounded-lg shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm"
+              onKeyPress={(e) => e.key === 'Enter' && !loading && handleSendMessage()}
+              disabled={loading}
+            />
+            <div className="absolute inset-y-0 right-0 flex items-center pr-3">
+              <Sparkles className="h-5 w-5 text-gray-400" />
+            </div>
+          </div>
+          
+          <button
+            onClick={() => handleSendMessage()}
+            disabled={loading || !inputQuery.trim()}
+            className="inline-flex items-center px-4 py-3 border border-transparent rounded-lg shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {loading ? (
+              <RefreshCw className="h-5 w-5 animate-spin" />
+            ) : (
+              <Send className="h-5 w-5" />
+            )}
+          </button>
+        </div>
+        
+        {/* 快速问题提示 */}
+        <div className="mt-3 flex flex-wrap gap-2">
+          {[
+            '分析本季度的收入趋势',
+            '成本结构如何优化？',
+            '各产品线利润率对比',
+            '资金利用效率分析'
+          ].map((question, index) => (
+            <button
+              key={index}
+              onClick={() => setInputQuery(question)}
+              className="inline-flex items-center px-2.5 py-1 border border-gray-300 shadow-sm text-xs font-medium rounded text-gray-600 bg-gray-50 hover:bg-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              disabled={loading}
+            >
+              {question}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default FinancialAnalysis;

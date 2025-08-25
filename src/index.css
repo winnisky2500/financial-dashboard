@@ -1,0 +1,114 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 基础小样式（保留即可） */
+img { object-position: top; }
+.fixed { position: fixed; }
+
+/* =======================
+   主题变量：黑紫（Black–Purple）
+   ======================= */
+/* 说明：使用 HSL 三元，组件里可用 hsl(var(--xxx)) 引用 */
+:root {
+  --radius: 0.5rem;
+
+  /* 白天（浅色紫调） */
+  --sidebar-background: 260 20% 98%;
+  --sidebar-foreground: 260 18% 14%;
+  --sidebar-border:     260 15% 86%;
+
+  --sidebar-primary:    265 85% 58%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent:     280 60% 58%;
+  --sidebar-accent-foreground: 260 18% 14%;
+  --sidebar-ring:       265 85% 58%;
+
+  --card-bg:            0 0% 100%;
+  --card-border:        260 15% 86%;
+
+  --muted-fg:           260 10% 40%;
+  --muted-fg-weak:      260 8% 50%;
+}
+
+html.dark {
+  /* 深夜（黑紫） */
+  --sidebar-background: 258 33% 7%;
+  --sidebar-foreground: 260 18% 94%;
+  --sidebar-border:     260 12% 22%;
+
+  --sidebar-primary:    265 85% 62%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent:     280 65% 60%;
+  --sidebar-accent-foreground: 260 18% 96%;
+  --sidebar-ring:       265 85% 62%;
+
+  --card-bg:            258 28% 9%;
+  --card-border:        260 12% 22%;
+
+  --muted-fg:           260 10% 70%;
+  --muted-fg-weak:      260 8% 60%;
+}
+
+/* =======================
+   全局铺底（确保立刻看到变化）
+   ======================= */
+html, body, #root { height: 100%; }
+body {
+  background: hsl(var(--sidebar-background)) !important;
+  color:      hsl(var(--sidebar-foreground)) !important;
+}
+
+/* =======================
+   可复用的语义工具类（可选）
+   ======================= */
+.bg-page    { background-color: hsl(var(--sidebar-background)) !important; }
+.text-page  { color:            hsl(var(--sidebar-foreground)) !important; }
+.bg-card    { background-color: hsl(var(--card-bg)) !important; }
+.border-card{ border-color:     hsl(var(--card-border)) !important; }
+.btn-primary{ background-color: hsl(var(--sidebar-primary)) !important;
+              color:            hsl(var(--sidebar-primary-foreground)) !important; }
+
+/* =======================
+   类名 → 变量 的映射（不改组件代码）
+   —— 覆盖 Overview / Dashboard 常用类
+   ======================= */
+/* 背景 */
+.bg-white    { background-color: hsl(var(--card-bg)) !important; }
+.bg-gray-50  { background-color: hsl(var(--sidebar-background)) !important; }
+.bg-gray-100 { background-color: color-mix(in hsl,
+                     hsl(var(--sidebar-foreground)) 4%,
+                     hsl(var(--sidebar-background))) !important; }
+
+/* 文字 */
+.text-gray-900 { color: hsl(var(--sidebar-foreground)) !important; }
+.text-gray-700 { color: hsl(var(--muted-fg)) !important; }
+.text-gray-600 { color: hsl(var(--muted-fg)) !important; }
+.text-gray-500 { color: hsl(var(--muted-fg-weak)) !important; }
+
+/* 边框 */
+.border-gray-200 { border-color: hsl(var(--sidebar-border)) !important; }
+.border-gray-300 { border-color: hsl(var(--sidebar-border)) !important; }
+
+/* 将原蓝色系映射到紫色主色（标签/Tab/焦点） */
+.text-blue-600   { color: hsl(var(--sidebar-primary)) !important; }
+.text-blue-800   { color: color-mix(in hsl, hsl(var(--sidebar-primary)) 85%, black) !important; }
+.bg-blue-50      { background-color: color-mix(in hsl,
+                           hsl(var(--sidebar-primary)) 12%,
+                           hsl(var(--sidebar-background))) !important; }
+.border-blue-500 { border-color: hsl(var(--sidebar-primary)) !important; }
+.focus\:ring-blue-500:focus { --tw-ring-color: hsl(var(--sidebar-primary)) !important; }
+
+/* 行业小圆点（可保留原色，也可轻微偏紫） */
+.bg-purple-500 { background-color: hsl(270 95% 60%) !important; }
+.bg-blue-500   { background-color: hsl(var(--sidebar-primary)) !important; }
+.bg-green-500  { background-color: hsl(150 70% 45%) !important; }
+.bg-orange-500 { background-color: hsl(25 95% 55%) !important; }
+.bg-gray-500   { background-color: hsl(var(--muted-fg-weak)) !important; }
+
+/* 交互状态 */
+.hover\:bg-gray-50:hover {
+  background-color: color-mix(in hsl,
+    hsl(var(--sidebar-foreground)) 6%,
+    hsl(var(--sidebar-background))) !important;
+}

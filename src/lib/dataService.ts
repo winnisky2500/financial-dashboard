@@ -1,0 +1,1249 @@
+import { supabase, isDemoMode, getDemoFinancialIndicators, getDemoPolicyNews, getDemoSubsidiaries, getDemoSectors } from './supabase';
+import { createClient } from '@supabase/supabase-js';
+
+// 数据类型定义
+export interface FinancialIndicator {
+  id: string;
+  name: string;
+  code: string;
+  value: number;
+  previousValue: number;
+  targetValue: number;
+  unit: string;
+  category: string;
+  questions: string[];
+}
+
+// 统一的政策数据类型（仅供前端渲染使用）
+export interface PolicyNewsItem {
+  id: string;
+  title: string;
+  category?: string;
+  publisher?: string;   // ✅ 发布机构（唯一来源显示字段）
+  url?: string;         // 原文链接（查看全文）
+  content?: string;     // 摘要
+  detail?: string;      // ✅ 详细内容（Markdown/纯文本）
+  publishDate?: string; // YYYY-MM-DD
+  createdAt?: string;
+  [k: string]: any;
+}
+
+export interface SubsidiaryData {
+  id: number;
+  name: string;
+  sector_id: number;
+  parent_id: number | null;
+  level: number;
+}
+
+export interface KPIData {
+  id: number;
+  name: string;
+  code: string;
+  unit: string;
+  category: string;
+  description: string;
+}
+
+export interface FinancialData {
+  id: number;
+  subsidiary_id: number;
+  kpi_id: number;
+  period_date: string;
+  period_type: string;
+  value: number;
+}
+
+// 增强的模拟分析类型定义
+export interface EnhancedARIMAParams {
+  historicalData: number[];
+  periods?: number;
+  p?: number;
+  d?: number;
+  q?: number;
+  exchangeRateChange?: number;
+  interestRateChange?: number;
+  customParams?: { [key: string]: any };
+}
+
+export interface EnhancedMonteCarloParams {
+  initialValue: number;
+  numSimulations?: number;
+  timeHorizon?: number;
+  drift?: number;
+  volatility?: number;
+  exchangeRateChange?: number;
+  interestRateChange?: number;
+  customParams?: { [key: string]: any };
+  modelType?: 'geometric_brownian' | 'mean_reverting' | 'jump_diffusion';
+  jumpParameters?: any;
+}
+
+export interface CustomPythonParams {
+  pythonCode: string;
+  inputData: number[];
+  parameters?: { [key: string]: any };
+  executionTimeout?: number;
+}
+
+export interface SimulationResult {
+  success: boolean;
+  model: string;
+  data: {
+    predictions?: number[];
+    simulations?: number[][];
+    percentilePaths?: { [key: string]: number[] };
+    scenarios?: {
+      name: string;
+      probability: number;
+      count: number;
+      averagePath: number[];
+      description: string;
+    }[];
+    statistics: {
+      finalValues?: {
+        mean: number;
+        median: number;
+        standardDeviation: number;
+        min: number;
+        max: number;
+        [key: string]: any;
+      };
+      distribution?: {
+        skewness: number;
+        kurtosis: number;
+        percentiles: { [key: string]: number };
+      };
+      [key: string]: any;
+    };
+    riskMetrics?: {
+      valueAtRisk?: {
+        var95: number;
+        var99: number;
+        interpretation: string;
+      };
+      drawdownAnalysis?: {
+        averageMaxDrawdown: number;
+        worstCaseDrawdown: number;
+        interpretation: string;
+      };
+      probabilityMetrics?: {
+        probabilityOfLoss: number;
+        probabilityOfGain: number;
+        expectedReturn: number;
+      };
+      [key: string]: any;
+    };
+    confidenceIntervals?: {
+      lower95: number[];
+      upper95: number[];
+      lower99: number[];
+      upper99: number[];
+    };
+    diagnostics?: any;
+    modelFit?: {
+      aic: number;
+      bic: number;
+      rsquared: number;
+    };
+    executionInfo?: {
+      codeLength: number;
+      inputDataPoints: number;
+      executionTime: number;
+      memoryUsage: string;
+      codeComplexity: any;
+    };
+    [key: string]: any;
+  };
+  timestamp?: string;
+  executionTime?: number;
+}
+
+export interface ExportRequest {
+  simulationData: any;
+  metadata: {
+    analysisType: string;
+    parameters: any;
+    timestamp: string;
+  };
+  chartImages?: any[];
+}
+
+// AI财务分析相关类型定义
+export interface AnalysisQuery {
+  query: string;
+  analysisMode: 'dimension' | 'metric' | 'business' | 'anomaly';
+  contextData?: any;
+  chatHistory?: ChatMessage[];
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp?: string;
+}
+
+export interface AnalysisResponse {
+  analysis: string;
+  insights: string[];
+  recommendations: string[];
+  chartSuggestions: {
+    type: string;
+    title: string;
+    description: string;
+    dataSource: string;
+  }[];
+  followUpQuestions: string[];
+}
+
+export interface AIAnalysisResult {
+  response: AnalysisResponse;
+  mode: string;
+  timestamp: string;
+  note?: string;
+}
+
+// 模拟相关类型定义（保持向后兼容）
+export interface ARIMAParams {
+  p: number;
+  d: number;
+  q: number;
+  length: number;
+  historicalData?: number[];
+  arCoeffs?: number[];
+  maCoeffs?: number[];
+  variance?: number;
+}
+
+export interface MonteCarloParams {
+  numSimulations: number;
+  timeHorizon: number;
+  initialValue: number;
+  drift?: number;
+  volatility?: number;
+  seed?: number;
+}
+
+/**
+ * 获取财务指标数据
+ */
+export async function getFinancialIndicators(): Promise<FinancialIndicator[]> {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      console.error('获取财务指标时无有效会话');
+    } else {
+      console.log('获取财务指标时有有效会话:', session.user?.id);
+    }
+    
+    if (isDemoMode()) {
+      console.log('使用演示模式数据 - 财务指标');
+      return await getDemoFinancialIndicators();
+    }
+    
+    const { data: indicators, error: indicatorError } = await supabase
+      .from('financial_indicators')
+      .select('*')
+      .eq('is_active', true)
+      .order('display_order', { ascending: true });
+    
+    if (indicatorError) {
+      console.error('获取财务指标数据失败:', indicatorError);
+      return [];
+    }
+
+    if (!indicators || indicators.length === 0) {
+      console.warn('没有找到财务指标数据');
+      return [];
+    }
+    
+    return indicators.map(indicator => ({
+      id: indicator.id.toString(),
+      name: indicator.name,
+      code: indicator.code,
+      value: indicator.current_value,
+      previousValue: indicator.previous_value,
+      targetValue: indicator.target_value,
+      unit: indicator.unit,
+      category: indicator.category,
+      questions: indicator.suggested_questions || []
+    }));
+  } catch (error) {
+    console.error('获取财务指标异常:', error);
+    return [];
+  }
+}
+
+/**
+ * 获取政策动态数据
+ */
+export async function getPolicyNews(): Promise<PolicyNewsItem[]> {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session) {
+      console.error('获取政策动态时无有效会话');
+    } else {
+      console.log('获取政策动态时有有效会话:', session.user?.id);
+    }
+
+    if (isDemoMode()) {
+      console.log('使用演示模式数据 - 政策动态');
+      return await getDemoPolicyNews();
+    }
+
+    // 统一从 policy_news 读取；* 便于兼容不同列名
+    const { data, error } = await supabase
+      .from('policy_news')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    if (error) {
+      console.error('获取政策动态失败:', error);
+      return [];
+    }
+    if (!data || data.length === 0) {
+      console.warn('没有找到政策动态数据');
+      return [];
+    }
+
+    const isHttp = (s: any) => typeof s === 'string' && /^https?:\/\//i.test(s);
+
+    return data.map((item: any) => {
+      // URL 多重兜底：url -> source_url -> link -> (source是URL)
+      const url =
+        item.url ??
+        item.source_url ??
+        item.link ??
+        (isHttp(item.source) ? item.source : '') ??
+        '';
+
+      // 发布机构：优先 publisher，其次可能的别名列
+      const publisher =
+        item.publisher ??
+        item.publisher_name ??
+        item.source_name ??
+        '';
+
+      // 日期列兼容：publish_date / published_at / created_at
+      const publishDateRaw =
+        item.publish_date ??
+        item.published_at ??
+        item.publishDate ??
+        item.created_at ??
+        '';
+
+      return {
+        id: String(item.id),
+        title: item.title ?? '',
+        category: item.category ?? '',
+        industry: item.industry ?? '宏观综合',
+        impact: item.impact ?? undefined,
+
+        // ✅ 关键字段
+        publisher,                   // 机构名（标题下显示）
+        url,                         // 原文链接（“来源”行显示）
+        content: item.content ?? item.summary ?? '', // 摘要
+        detail: item.detail ?? item.details ?? '',   // 详细内容
+
+        publishDate: publishDateRaw ? String(publishDateRaw).slice(0, 10) : '',
+        createdAt: item.created_at ?? undefined,
+
+        // 兼容旧字段（不在页面使用）
+        source: item.source ?? undefined,
+        summary: item.summary ?? undefined,
+      } as PolicyNewsItem;
+    });
+  } catch (error) {
+    console.error('获取政策动态异常:', error);
+    return [];
+  }
+}
+
+
+/**
+ * 获取子公司数据
+ */
+export async function getSubsidiaries(): Promise<SubsidiaryData[]> {
+  try {
+    if (isDemoMode()) {
+      return await getDemoSubsidiaries();
+    }
+    
+    const { data, error } = await supabase
+      .from('subsidiaries')
+      .select('*')
+      .order('id', { ascending: true });
+    
+    if (error) {
+      console.error('获取子公司数据失败:', error);
+      return [];
+    }
+    
+    return data;
+  } catch (error) {
+    console.error('获取子公司异常:', error);
+    return [];
+  }
+}
+
+/**
+ * 获取板块数据
+ */
+export async function getSectors() {
+  try {
+    if (isDemoMode()) {
+      return await getDemoSectors();
+    }
+    
+    const { data, error } = await supabase
+      .from('sectors')
+      .select('*');
+    
+    if (error) {
+      console.error('获取板块数据失败:', error);
+      return [];
+    }
+    
+    return data;
+  } catch (error) {
+    console.error('获取板块异常:', error);
+    return [];
+  }
+}
+
+/**
+ * 增强的ARIMA分析
+ */
+export async function runEnhancedARIMAAnalysis(params: EnhancedARIMAParams): Promise<SimulationResult> {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    const authHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (session?.access_token) authHeaders.Authorization = `Bearer ${session.access_token}`;
+
+    const { data, error } = await supabase.functions.invoke('enhanced-arima-analysis', {
+      body: {
+        historicalData: params.historicalData,
+        parameters: { /* ... */ }
+      },
+      headers: authHeaders
+    });
+
+
+    if (error) {
+      // Edge Function 没部署/报500时，给出清晰提示 + 本地兜底
+      console.warn('Edge Function 调用失败，使用本地兜底 ARIMA 近似：', error);
+
+      const y = (params.historicalData || []).map(Number);
+      const n = y.length || 12;
+      const periods = params.periods || 12;
+
+      // 简单线性趋势外推（最小二乘斜率）
+      const xs = Array.from({ length: n }, (_, i) => i + 1);
+      const xbar = xs.reduce((a, b) => a + b, 0) / n;
+      const ybar = y.reduce((a, b) => a + b, 0) / n;
+      const slope = xs.reduce((s, xi, i) => s + (xi - xbar) * (y[i] - ybar), 0) /
+                    xs.reduce((s, xi) => s + (xi - xbar) ** 2, 0 || 1);
+      const intercept = ybar - slope * xbar;
+
+      const predictions = Array.from({ length: periods }, (_, k) => {
+        const t = n + (k + 1);
+        return Math.max(0, intercept + slope * t);
+      });
+
+      return {
+        success: true,
+        model: 'Enhanced-ARIMA(Fallback)',
+        data: {
+          predictions,
+          statistics: {},
+        },
+        timestamp: new Date().toISOString(),
+        executionTime: 0.01
+      };
+    }
+
+
+    return {
+      success: true,
+      model: 'Enhanced-ARIMA',
+      data: data,
+      timestamp: new Date().toISOString(),
+      executionTime: 1.2
+    };
+  } catch (error) {
+    console.error('Enhanced ARIMA调用失败:', error);
+    throw error;
+  }
+}
+
+/**
+ * 增强的蒙特卡洛模拟
+ */
+export async function runEnhancedMonteCarloSimulation(
+  params: EnhancedMonteCarloParams
+): Promise<SimulationResult> {
+  try {
+    // 跟 ARIMA 一致：带上用户态 token
+    const { data: { session } } = await supabase.auth.getSession();
+    const authHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (session?.access_token) authHeaders.Authorization = `Bearer ${session.access_token}`;
+
+    // 调用 Edge Function（保持你现有参数命名）
+    const { data, error } = await supabase.functions.invoke('enhanced-monte-carlo-simulation', {
+      body: {
+        initialValue: params.initialValue,
+        parameters: {
+          numSimulations: params.numSimulations ?? 1000,
+          timeHorizon: params.timeHorizon ?? 12,
+          drift: params.drift ?? 0.05,
+          volatility: params.volatility ?? 0.15,
+          exchangeRateChange: params.exchangeRateChange ?? 0,
+          interestRateChange: params.interestRateChange ?? 0,
+          customParams: params.customParams ?? {},
+          modelType: params.modelType ?? 'geometric_brownian',
+          jumpParameters: params.jumpParameters
+        }
+      },
+      headers: authHeaders
+    });
+
+    if (error) {
+      // 与 ARIMA 一致：函数报错 → 本地兜底
+      console.warn('Edge Function 调用失败，使用本地兜底 Monte Carlo 近似：', error);
+
+      // ---- 本地兜底：几何布朗运动（生成各分位路径） ----
+      const N = params.timeHorizon ?? 12;
+      const mu = params.drift ?? 0.05;
+      const sigma = params.volatility ?? 0.15;
+      const S0 = Math.max(0, Number(params.initialValue ?? 0));
+      const zmap = {
+        p5: -1.6448536269,
+        p25: -0.67448975,
+        p50: 0,
+        p75: 0.67448975,
+        p95: 1.6448536269
+      };
+      const genPath = (zScore: number) => {
+        const path: number[] = [S0];
+        for (let t = 1; t <= N; t++) {
+          const prev = path[path.length - 1];
+          const next = prev * Math.exp((mu - 0.5 * sigma * sigma) * 1 + sigma * zScore * Math.sqrt(1));
+          path.push(next);
+        }
+        return path;
+      };
+      const percentilePaths = {
+        p5: genPath(zmap.p5),
+        p25: genPath(zmap.p25),
+        p50: genPath(zmap.p50),
+        p75: genPath(zmap.p75),
+        p95: genPath(zmap.p95)
+      };
+
+      return {
+        success: true,
+        model: 'Enhanced-Monte-Carlo(Fallback)',
+        data: {
+          percentilePaths,
+          statistics: {
+            initialValue: S0,
+            drift: mu,
+            volatility: sigma,
+            horizon: N
+          }
+        },
+        timestamp: new Date().toISOString(),
+        executionTime: 0.01
+      };
+    }
+
+    // 成功返回
+    return {
+      success: true,
+      model: 'Enhanced-Monte-Carlo',
+      data: data,
+      timestamp: new Date().toISOString(),
+      executionTime: 1.2
+    };
+  } catch (error) {
+    console.error('Enhanced Monte Carlo 调用失败:', error);
+    // 为了和当前前端结构兼容，catch 里也返回兜底（防止 data 为 null）
+    const N = params.timeHorizon ?? 12;
+    const mu = params.drift ?? 0.05;
+    const sigma = params.volatility ?? 0.15;
+    const S0 = Math.max(0, Number(params.initialValue ?? 0));
+    const zmap = { p5: -1.6448536269, p25: -0.67448975, p50: 0, p75: 0.67448975, p95: 1.6448536269 };
+    const genPath = (z: number) => {
+      const path = [S0];
+      for (let t = 1; t <= N; t++) {
+        const prev = path[path.length - 1];
+        path.push(prev * Math.exp((mu - 0.5 * sigma * sigma) + sigma * z));
+      }
+      return path;
+    };
+    const percentilePaths = {
+      p5: genPath(zmap.p5),
+      p25: genPath(zmap.p25),
+      p50: genPath(zmap.p50),
+      p75: genPath(zmap.p75),
+      p95: genPath(zmap.p95)
+    };
+    return {
+      success: true,
+      model: 'Enhanced-Monte-Carlo(Fallback)',
+      data: { percentilePaths, statistics: { initialValue: S0, drift: mu, volatility: sigma, horizon: N } },
+      timestamp: new Date().toISOString(),
+      executionTime: 0.01
+    };
+  }
+}
+
+
+
+/**
+ * 执行自定义Python函数
+ */
+export async function executeCustomPythonFunction(params: CustomPythonParams): Promise<SimulationResult> {
+  try {
+    const { data, error } = await supabase.functions.invoke('secure-python-executor', {
+      body: {
+        pythonCode: params.pythonCode,
+        inputData: params.inputData,
+        parameters: params.parameters || {},
+        executionTimeout: params.executionTimeout || 30000
+      },
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (error) {
+      throw new Error(error.message || 'Python代码执行失败');
+    }
+
+    return {
+      success: true,
+      model: 'Custom-Python',
+      data: data,
+      timestamp: new Date().toISOString(),
+      executionTime: data.executionInfo?.executionTime || 1.0
+    };
+  } catch (error) {
+    console.error('Custom Python执行失败:', error);
+    throw error;
+  }
+}
+
+/**
+ * 导出CSV数据
+ */
+export async function exportToCSV(request: ExportRequest): Promise<Blob> {
+  try {
+    const response = await fetch(
+      'https://ldmttwyxmfxbdmegfxef.supabase.co/functions/v1/csv-export',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxkbXR0d3l4bWZ4YmRtZWdmeGVmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTU1ODIxMzgsImV4cCI6MjA3MTE1ODEzOH0.B93dW93pZirLyPqSZvxEzsLwEBsHgoQrepb9-VcabDg'
+        },
+        body: JSON.stringify(request)
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error('CSV导出失败');
+    }
+
+    return await response.blob();
+  } catch (error) {
+    console.error('CSV导出错误:', error);
+    throw error;
+  }
+}
+
+/**
+ * 生成PDF报告
+ */
+export async function generatePDFReport(request: ExportRequest): Promise<{ reportContent: string; fileName: string; metadata: any }> {
+  try {
+    const { data, error } = await supabase.functions.invoke('pdf-report-generator', {
+      body: request,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (error) {
+      throw new Error(error.message || 'PDF报告生成失败');
+    }
+
+    return data;
+  } catch (error) {
+    console.error('PDF报告生成错误:', error);
+    throw error;
+  }
+}
+
+/**
+ * 上传Python文件到Storage
+ */
+export async function uploadPythonFile(file: File): Promise<{ publicUrl: string; fileName: string }> {
+  try {
+    const fileName = `python-functions/${Date.now()}-${file.name}`;
+    
+    const { data, error } = await supabase.storage
+      .from('simulation-files')
+      .upload(fileName, file, {
+        cacheControl: '3600',
+        upsert: false
+      });
+
+    if (error) {
+      throw new Error(error.message || '文件上传失败');
+    }
+
+    const { data: { publicUrl } } = supabase.storage
+      .from('simulation-files')
+      .getPublicUrl(fileName);
+
+    return {
+      publicUrl,
+      fileName: file.name
+    };
+  } catch (error) {
+    console.error('文件上传错误:', error);
+    throw error;
+  }
+}
+
+/**
+ * 下载文件
+ */
+export function downloadFile(blob: Blob, fileName: string): void {
+  const url = window.URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  window.URL.revokeObjectURL(url);
+}
+
+/**
+ * AI财务分析代理
+ */
+export async function queryFinancialAnalysisAgent(params: AnalysisQuery): Promise<AIAnalysisResult> {
+  try {
+    const { data, error } = await supabase.functions.invoke('financial-analysis-agent', {
+      body: {
+        query: params.query,
+        analysisMode: params.analysisMode,
+        contextData: params.contextData,
+        chatHistory: params.chatHistory
+      },
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (error) {
+      throw new Error(error.message || 'AI财务分析失败');
+    }
+
+    return data;
+  } catch (error) {
+    console.error('AI财务分析调用失败:', error);
+    throw error;
+  }
+}
+
+/**
+ * 获取分析模式列表
+ */
+export function getAnalysisModes() {
+  return [
+    {
+      id: 'dimension' as const,
+      name: '维度分析',
+      description: '从时间、地区、产品等多个维度分析财务数据',
+      icon: '📈'
+    },
+    {
+      id: 'metric' as const,
+      name: '指标分析', 
+      description: '分析关键财务指标，如收入、利润、成本等',
+      icon: '📊'
+    },
+    {
+      id: 'business' as const,
+      name: '业务钻取分析',
+      description: '深入分析特定业务领域，提供详细业务洞察',
+      icon: '🔍'
+    },
+    {
+      id: 'anomaly' as const,
+      name: '异常分析',
+      description: '识别和分析财务数据中的异常情况和风险',
+      icon: '⚠️'
+    }
+  ];
+}
+
+/**
+ * 报告生成AI函数（兼容性函数）
+ */
+export async function callReportGenerationAI(query: string): Promise<any> {
+  try {
+    const result = await queryFinancialAnalysisAgent({
+      query: query,
+      analysisMode: 'business',
+      contextData: {
+        reportType: 'comprehensive',
+        timestamp: new Date().toISOString()
+      }
+    });
+    
+    return {
+      response: {
+        analysis: result.response.analysis,
+        summary: result.response.analysis.substring(0, 200) + '...',
+        key_metrics: [],
+        charts: []
+      },
+      metadata: {
+        timestamp: result.timestamp,
+        reportType: 'AI Generated Report'
+      }
+    };
+  } catch (error) {
+    console.error('报告生成失败:', error);
+    throw error;
+  }
+}
+
+// 智能报告生成相关类型定义
+export interface ReportGenerationParams {
+  reportType: string;
+  dataRange?: string;
+  language?: string;
+  customRequirements?: string;
+  templateStructure?: string;
+  financialData?: any;
+  parameters?: any;
+}
+
+export interface ReportGenerationResult {
+  reportId: string;
+  content: string;
+  metadata: {
+    reportType: string;
+    language: string;
+    sections: string[];
+    generatedAt: string;
+    dataRange: string;
+    aiGenerated: boolean;
+    note?: string;
+  };
+  downloadUrl: string;
+  fileName: string;
+  generatedAt: string;
+}
+
+export interface TemplateInfo {
+  templateId: string;
+  fileName: string;
+  fileType: string;
+  templateType: string;
+  publicUrl?: string;
+  content?: string;
+  structure?: {
+    sections: any[];
+    variables: string[];
+    placeholders: any[];
+    headings: any[];
+    tables: any[];
+  };
+  size?: number;
+  uploadedAt?: string;
+  lastModified?: string;
+}
+
+export interface DocumentExportParams {
+  content: string;
+  format: 'pdf' | 'docx' | 'word' | 'md' | 'markdown' | 'html' | 'txt';
+  fileName?: string;
+  metadata?: any;
+  options?: any;
+}
+
+export interface DocumentExportResult {
+  fileName: string;
+  downloadUrl: string;
+  fileSize: number;
+  contentType: string;
+  content?: string;
+  metadata: {
+    exportedAt: string;
+    format: string;
+    [key: string]: any;
+  };
+}
+
+/**
+ * 智能报告生成
+ */
+export async function generateIntelligentReport(params: ReportGenerationParams): Promise<ReportGenerationResult> {
+  try {
+    const { data, error } = await supabase.functions.invoke('intelligent-report-generator', {
+      body: params,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (error) {
+      throw new Error(error.message || '报告生成失败');
+    }
+
+    return data;
+  } catch (error) {
+    console.error('智能报告生成失败:', error);
+    throw error;
+  }
+}
+
+/**
+ * 模板管理相关函数
+ */
+export async function uploadTemplate(templateData: {
+  fileName: string;
+  content: string;
+  metadata?: any;
+}, templateType?: string): Promise<TemplateInfo> {
+  try {
+    const { data, error } = await supabase.functions.invoke('template-manager', {
+      body: {
+        action: 'upload',
+        templateData,
+        templateType
+      },
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (error) {
+      throw new Error(error.message || '模板上传失败');
+    }
+
+    return data;
+  } catch (error) {
+    console.error('模板上传失败:', error);
+    throw error;
+  }
+}
+
+export async function listTemplates(): Promise<TemplateInfo[]> {
+  try {
+    const { data, error } = await supabase.functions.invoke('template-manager', {
+      body: {
+        action: 'list'
+      },
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (error) {
+      console.warn('获取模板列表失败:', error);
+      return [];
+    }
+
+    return data || [];
+  } catch (error) {
+    console.error('获取模板列表失败:', error);
+    return [];
+  }
+}
+
+export async function getTemplate(templateId: string): Promise<TemplateInfo> {
+  try {
+    const { data, error } = await supabase.functions.invoke('template-manager', {
+      body: {
+        action: 'get',
+        templateId
+      },
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (error) {
+      throw new Error(error.message || '获取模板失败');
+    }
+
+    return data;
+  } catch (error) {
+    console.error('获取模板失败:', error);
+    throw error;
+  }
+}
+
+export async function deleteTemplate(templateId: string): Promise<void> {
+  try {
+    const { data, error } = await supabase.functions.invoke('template-manager', {
+      body: {
+        action: 'delete',
+        templateId
+      },
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (error) {
+      throw new Error(error.message || '模板删除失败');
+    }
+  } catch (error) {
+    console.error('模板删除失败:', error);
+    throw error;
+  }
+}
+
+export async function updateTemplate(templateId: string, templateData: { content: string }): Promise<void> {
+  try {
+    const { data, error } = await supabase.functions.invoke('template-manager', {
+      body: {
+        action: 'update',
+        templateId,
+        templateData
+      },
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (error) {
+      throw new Error(error.message || '模板更新失败');
+    }
+  } catch (error) {
+    console.error('模板更新失败:', error);
+    throw error;
+  }
+}
+
+/**
+ * 文档导出函数
+ */
+export async function exportDocument(params: DocumentExportParams): Promise<DocumentExportResult> {
+  try {
+    const { data, error } = await supabase.functions.invoke('document-exporter', {
+      body: params,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    if (error) {
+      throw new Error(error.message || '文档导出失败');
+    }
+
+    return data;
+  } catch (error) {
+    console.error('文档导出失败:', error);
+    throw error;
+  }
+}
+
+/**
+ * 获取报告类型列表
+ */
+export function getReportTypes() {
+  return [
+    {
+      id: 'annual-financial',
+      name: '年度财务报告',
+      description: '全面的年度财务业绩报告，包括收入、利润、现金流等分析',
+      sections: 8,
+      estimatedPages: '15-25',
+      color: 'blue'
+    },
+    {
+      id: 'quarterly-performance',
+      name: '季度业绩报告',
+      description: '季度经营业绩和财务表现分析，关注短期趋势',
+      sections: 5,
+      estimatedPages: '8-15',
+      color: 'green'
+    },
+    {
+      id: 'risk-assessment',
+      name: '风险评估报告',
+      description: '全面的风险识别、评估和管理建议报告',
+      sections: 7,
+      estimatedPages: '12-20',
+      color: 'red'
+    },
+    {
+      id: 'industry-analysis',
+      name: '行业分析报告',
+      description: '深入的行业分析，包括市场趋势、竞争格局等',
+      sections: 7,
+      estimatedPages: '10-18',
+      color: 'purple'
+    },
+    {
+      id: 'investment-recommendation',
+      name: '投资建议报告',
+      description: '专业的投资分析和建议，包括估值和风险评估',
+      sections: 7,
+      estimatedPages: '8-15',
+      color: 'orange'
+    },
+    {
+      id: 'compliance-audit',
+      name: '合规审计报告',
+      description: '合规性检查和内控制度评估报告',
+      sections: 7,
+      estimatedPages: '10-16',
+      color: 'gray'
+    }
+  ];
+}
+
+// 兼容性函数（保持旧API）
+export async function runARIMASimulation(params: ARIMAParams): Promise<SimulationResult> {
+  return runEnhancedARIMAAnalysis({
+    historicalData: params.historicalData || [100, 105, 110, 115, 120, 125],
+    periods: params.length,
+    p: params.p,
+    d: params.d,
+    q: params.q
+  });
+}
+
+export async function runMonteCarloSimulation(params: MonteCarloParams): Promise<SimulationResult> {
+  return runEnhancedMonteCarloSimulation({
+    initialValue: params.initialValue,
+    numSimulations: params.numSimulations,
+    timeHorizon: params.timeHorizon,
+    drift: params.drift,
+    volatility: params.volatility
+  });
+}
+
+/* =========================
+ * 模拟页取数：financial_metrics & 指标库
+ * 追加于文件末尾
+ * ========================= */
+
+export type MetricSeries = { labels: string[]; values: number[]; unit?: string };
+export type MetricAliasItem = { canonical_name: string; unit?: string; description?: string | null };
+
+/** 从 financial_metrics 读取某公司某 canonical_name 的时间序列 */
+export async function fetchMetricTimeSeries({
+  companyName,
+  metricName,                 // ← 改为 metricName（表字段）
+  metricCanonicalName,        // ← 兼容旧入参：若传了也当作 metricName 用
+  maxPoints = 24,
+}: {
+  companyName: string;
+  metricName?: string;
+  metricCanonicalName?: string;
+  maxPoints?: number;
+}) {
+  const finalMetric = metricName ?? metricCanonicalName;
+  if (!companyName || !finalMetric) return { labels: [], values: [], unit: '' };
+
+  const { data, error } = await supabase
+    .from('financial_metrics')
+    .select('year, quarter, metric_value, company_name, metric_name')
+    .eq('company_name', companyName)
+    .eq('metric_name', finalMetric)      // ← 用 metric_name
+    .order('year', { ascending: true })
+    .order('quarter', { ascending: true })
+    .limit(maxPoints);
+
+  if (error) throw error;
+  if (!data || data.length === 0) return { labels: [], values: [], unit: '' }; // ← 不造数
+
+  const labels = data.map(r => `${r.year}年Q${r.quarter}`);
+  const values = data.map(r => Number(r.metric_value));
+  return { labels, values, unit: '' }; // ← 表里无 unit，这里固定空串以兼容旧代码
+}
+
+
+/** 从 financial_metrics 列出可选公司（去重） */
+export async function listCompaniesFromMetrics(): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('financial_metrics')
+    .select('company_name');
+
+  if (error) throw error;
+
+  const uniq = Array.from(new Set((data ?? []).map(d => d.company_name))).filter(Boolean);
+  return uniq.sort((a, b) => a.localeCompare(b, 'zh-CN'));
+}
+
+
+/** 列出可用的 canonical_name（建议直接来自 metric_alias_catalog） */
+export async function listCanonicalMetrics(companyName?: string): Promise<string[]> {
+  let q = supabase.from('financial_metrics').select('metric_name, company_name');
+  if (companyName) q = q.eq('company_name', companyName);
+
+  const { data, error } = await q;
+  if (error) throw error;
+
+  const uniq = Array.from(new Set((data ?? []).map(d => d.metric_name))).filter(Boolean);
+  return uniq.sort((a, b) => a.localeCompare(b, 'zh-CN'));
+}
+
+
+
+/** 公司下拉：列出 financial_metrics 里出现过的公司 */
+export async function listCompanies(): Promise<string[]> {
+  try {
+    const { data, error } = await supabase
+      .from('financial_metrics')
+      .select('company_name')
+      .limit(10000);
+    if (error) throw error;
+
+    const set = new Set<string>();
+    (data || []).forEach((r: any) => r?.company_name && set.add(String(r.company_name)));
+    const arr = Array.from(set);
+    arr.sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    return arr.length ? arr : ['XX集团公司'];
+  } catch {
+    return ['XX集团公司'];
+  }
+}
+
+/** 指标库：metric_alias_catalog（支持关键字模糊） */
+export async function listMetricAliases(keyword?: string): Promise<MetricAliasItem[]> {
+  try {
+    let q = supabase
+      .from('metric_alias_catalog')
+      .select('canonical_name, unit, description')
+      .limit(5000);
+    if (keyword && keyword.trim()) {
+      q = q.ilike('canonical_name', `%${keyword.trim()}%`);
+    }
+    const { data, error } = await q;
+    if (error) throw error;
+    return (data || []) as MetricAliasItem[];
+  } catch {
+    // 兜底常用指标，保证弹窗可用
+    return [
+      { canonical_name: '营业收入', unit: '万元', description: null },
+      { canonical_name: '净利润', unit: '万元', description: null },
+      { canonical_name: 'ROE', unit: '%',   description: null },
+      { canonical_name: '总资产周转率', unit: '次', description: null },
+      { canonical_name: '经营活动现金流净额', unit: '万元', description: null }
+    ];
+  }
+}
+
