@@ -134,7 +134,7 @@ const Login: React.FC = () => {
 
           <div className="mt-6 text-center">
             <p className="text-xs text-gray-500">
-              版权所有 © 2025 企业财务分析看板. 由 MiniMax Agent 开发.
+              版权所有 © 2025 企业财务分析看板.
             </p>
           </div>
         </div>
