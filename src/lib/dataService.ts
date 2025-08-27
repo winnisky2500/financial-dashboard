@@ -2,6 +2,15 @@ import { supabase, isDemoMode, getDemoFinancialIndicators, getDemoPolicyNews, ge
 import { createClient } from '@supabase/supabase-js';
 
 // 数据类型定义
+export interface ReportTemplateRow {
+  id: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  template_data: any;             // jsonb
+  created_at?: string;
+  updated_at?: string;
+}
 export interface FinancialIndicator {
   id: string;
   name: string;
@@ -826,13 +835,15 @@ export async function callReportGenerationAI(query: string): Promise<any> {
 
 // 智能报告生成相关类型定义
 export interface ReportGenerationParams {
-  reportType: string;
-  dataRange?: string;
-  language?: string;
-  customRequirements?: string;
-  templateStructure?: string;
-  financialData?: any;
-  parameters?: any;
+  reportType: string; // e.g. 'annual_financial'
+  language?: 'zh' | 'en';
+  customRequirements?: string;           // 额外说明
+  templateId?: string;                   // 选中的模板ID（可选）
+  parameters?: {
+    company_name: string;
+    start: { year: number; quarter: 'Q1'|'Q2'|'Q3'|'Q4' };
+    end:   { year: number; quarter: 'Q1'|'Q2'|'Q3'|'Q4' };
+  };
 }
 
 export interface ReportGenerationResult {
@@ -896,143 +907,124 @@ export interface DocumentExportResult {
  * 智能报告生成
  */
 export async function generateIntelligentReport(params: ReportGenerationParams): Promise<ReportGenerationResult> {
-  try {
-    const { data, error } = await supabase.functions.invoke('intelligent-report-generator', {
-      body: params,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
+  const url =
+    import.meta.env.VITE_REPORT_AGENT_URL?.replace(/\/$/, '') ||
+    (import.meta.env.VITE_ROE_AGENT_URL ? `${import.meta.env.VITE_ROE_AGENT_URL.replace(/\/$/, '')}/report/generate` : '');
 
-    if (error) {
-      throw new Error(error.message || '报告生成失败');
-    }
-
-    return data;
-  } catch (error) {
-    console.error('智能报告生成失败:', error);
-    throw error;
+  if (!url) {
+    throw new Error('未配置 REPORT_AGENT_URL 或 ROE_AGENT_URL，无法生成报告');
   }
+
+  const token =
+    import.meta.env.VITE_REPORT_AGENT_TOKEN || import.meta.env.VITE_ROE_AGENT_TOKEN || '';
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
+    },
+    body: JSON.stringify(params)
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`报告生成失败: ${res.status} ${text}`);
+  }
+
+  const data = await res.json();
+
+  // 适配前端现有类型
+  const result: ReportGenerationResult = {
+    reportId: data.job_id || data.report_id || crypto.randomUUID(),
+    content: data.content_md || data.content || '',
+    metadata: data.metadata || {
+      reportType: params.reportType,
+      language: params.language || 'zh',
+      sections: (data.sections || []).map((s: any) => s.title || String(s)),
+      generatedAt: data.generated_at || new Date().toISOString(),
+      dataRange: data.data_range || '',
+      aiGenerated: true,
+      note: data.note || undefined
+    },
+    downloadUrl: data.pdf_url || data.docx_url || '',
+    fileName: data.file_name || 'report.pdf',
+    generatedAt: data.generated_at || new Date().toISOString()
+  };
+
+  return result;
 }
 
 /**
  * 模板管理相关函数
  */
-export async function uploadTemplate(templateData: {
-  fileName: string;
-  content: string;
-  metadata?: any;
-}, templateType?: string): Promise<TemplateInfo> {
-  try {
-    const { data, error } = await supabase.functions.invoke('template-manager', {
-      body: {
-        action: 'upload',
-        templateData,
-        templateType
-      },
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (error) {
-      throw new Error(error.message || '模板上传失败');
-    }
-
-    return data;
-  } catch (error) {
-    console.error('模板上传失败:', error);
-    throw error;
-  }
+export async function uploadTemplate(row: {
+  name: string;
+  description?: string;
+  category?: string;
+  template_data: any;
+}): Promise<ReportTemplateRow> {
+  const { data, error } = await supabase
+    .from('report_templates')
+    .insert({
+      name: row.name,
+      description: row.description ?? null,
+      category: row.category ?? null,
+      template_data: row.template_data,
+    })
+    .select('id, name, description, category, template_data, created_at, updated_at')
+    .single();
+  if (error) throw error;
+  return data as ReportTemplateRow;
 }
 
-export async function listTemplates(): Promise<TemplateInfo[]> {
-  try {
-    const { data, error } = await supabase.functions.invoke('template-manager', {
-      body: {
-        action: 'list'
-      },
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (error) {
-      console.warn('获取模板列表失败:', error);
-      return [];
-    }
-
-    return data || [];
-  } catch (error) {
-    console.error('获取模板列表失败:', error);
-    return [];
-  }
+/** 列出模板（按更新时间倒序） */
+export async function listTemplates(): Promise<ReportTemplateRow[]> {
+  const { data, error } = await supabase
+    .from('report_templates')
+    .select('id, name, description, category, template_data, created_at, updated_at')
+    .order('updated_at', { ascending: false })
+    .limit(200);
+  if (error) throw error;
+  return (data ?? []) as ReportTemplateRow[];
 }
 
-export async function getTemplate(templateId: string): Promise<TemplateInfo> {
-  try {
-    const { data, error } = await supabase.functions.invoke('template-manager', {
-      body: {
-        action: 'get',
-        templateId
-      },
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (error) {
-      throw new Error(error.message || '获取模板失败');
-    }
-
-    return data;
-  } catch (error) {
-    console.error('获取模板失败:', error);
-    throw error;
-  }
+export async function getTemplate(templateId: string): Promise<ReportTemplateRow> {
+  const { data, error } = await supabase
+    .from('report_templates')
+    .select('id, name, description, category, template_data, created_at, updated_at')
+    .eq('id', templateId)
+    .single();
+  if (error) throw error;
+  return data as ReportTemplateRow;
 }
 
+/** 删除模板 */
 export async function deleteTemplate(templateId: string): Promise<void> {
-  try {
-    const { data, error } = await supabase.functions.invoke('template-manager', {
-      body: {
-        action: 'delete',
-        templateId
-      },
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (error) {
-      throw new Error(error.message || '模板删除失败');
-    }
-  } catch (error) {
-    console.error('模板删除失败:', error);
-    throw error;
-  }
+  const { error } = await supabase
+    .from('report_templates')
+    .delete()
+    .eq('id', templateId);
+  if (error) throw error;
 }
 
-export async function updateTemplate(templateId: string, templateData: { content: string }): Promise<void> {
-  try {
-    const { data, error } = await supabase.functions.invoke('template-manager', {
-      body: {
-        action: 'update',
-        templateId,
-        templateData
-      },
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (error) {
-      throw new Error(error.message || '模板更新失败');
-    }
-  } catch (error) {
-    console.error('模板更新失败:', error);
-    throw error;
-  }
+export async function updateTemplate(templateId: string, patch: {
+  name?: string;
+  description?: string;
+  category?: string;
+  template_data?: any;
+}): Promise<void> {
+  const { error } = await supabase
+    .from('report_templates')
+    .update({
+      ...(patch.name !== undefined ? { name: patch.name } : {}),
+      ...(patch.description !== undefined ? { description: patch.description } : {}),
+      ...(patch.category !== undefined ? { category: patch.category } : {}),
+      ...(patch.template_data !== undefined ? { template_data: patch.template_data } : {}),
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', templateId);
+  if (error) throw error;
 }
 
 /**
