@@ -7,74 +7,33 @@ import requests
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from dotenv import load_dotenv
 from datetime import datetime
-# --- CORS hardening ---
-from fastapi import Request
-from starlette.responses import JSONResponse, Response
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import Request
-from starlette.responses import JSONResponse, Response
 
-from dotenv import load_dotenv, find_dotenv
-import time
-p = find_dotenv(".env.backend", raise_error_if_not_found=False)
-load_dotenv(p, override=True)
-
-LLM_BASE  = (os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE") or os.getenv("LLM_BASE_URL") or "").rstrip("/")
-LLM_KEY   = os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY") or ""
-LLM_MODEL = os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or ""
-LLM_CONNECT_TIMEOUT = int(os.getenv("LLM_CONNECT_TIMEOUT") or 30)
-LLM_READ_TIMEOUT    = int(os.getenv("LLM_READ_TIMEOUT") or 90)
-print("[dataquery LLM]", LLM_BASE, LLM_MODEL)
+load_dotenv(".env")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+DEV_BYPASS_AUTH = os.getenv("DEV_BYPASS_AUTH") == "true"
 
 # --- timezone & LLM config ---
 try:
     from zoneinfo import ZoneInfo
 except Exception:
     ZoneInfo = None
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-DEV_BYPASS_AUTH = os.getenv("DEV_BYPASS_AUTH") == "true"
-# --- CORS (唯一定义，放在 app 创建之后) ---
-ALLOWED_ORIGINS = {"http://localhost:5173", "http://127.0.0.1:5173"}
+
+LLM_BASE  = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE") or os.getenv("LLM_BASE_URL")
+LLM_KEY   = os.getenv("OPENAI_API_KEY")  or os.getenv("LLM_API_KEY")
+LLM_MODEL = os.getenv("OPENAI_MODEL")    or os.getenv("LLM_MODEL")
 
 app = FastAPI(title="DataQuery Agent", version="0.6.0")
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=list(ALLOWED_ORIGINS),
-    allow_methods=["*"],
-    allow_headers=["*"],
-    allow_credentials=True,
+    allow_origins=["*"], allow_origin_regex=".*",
+    allow_methods=["GET","POST","OPTIONS"], allow_headers=["*"],
+    expose_headers=["*"], allow_credentials=False, max_age=86400,
 )
 
-@app.options("/{path:path}")
-async def options_handler(request: Request, path: str):
-    origin = request.headers.get("origin")
-    resp = Response(status_code=204)
-    if origin in ALLOWED_ORIGINS:
-        resp.headers.update({
-            "Access-Control-Allow-Origin": origin,
-            "Access-Control-Allow-Credentials": "true",
-            "Access-Control-Allow-Methods": request.headers.get("Access-Control-Request-Method", "*"),
-            "Access-Control-Allow-Headers": request.headers.get("Access-Control-Request-Headers", "*"),
-        })
-    return resp
-
-@app.middleware("http")
-async def add_cors_on_error(request: Request, call_next):
-    origin = request.headers.get("origin")
-    try:
-        resp = await call_next(request)
-    except Exception as e:
-        resp = JSONResponse({"detail": str(e)}, status_code=500)
-    if origin in ALLOWED_ORIGINS:
-        resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Access-Control-Allow-Credentials"] = "true"
-    return resp
-
 # ---------------- Common ---------------- #
-
 async def require_token(authorization: str = Header(None)):
     if DEV_BYPASS_AUTH:
         return
@@ -101,9 +60,35 @@ def _sb_safe(path: str, params: Dict[str,Any]) -> Any:
     except Exception as e:
         print("[supabase warn]", e)
         return []
-
 # --- metric matching helpers ---
 GROWTH_KWS = ["增长率", "同比", "环比", "增速"]  # 只用这些强语义词，不把“率”算进去
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", "", (s or "")).lower()
+
+def _has_any(s: str, kws: list[str]) -> bool:
+    ss = s or ""
+    return any(k in ss for k in kws)
+
+def _to_alias_list(als) -> list[str]:
+    if als is None: return []
+    if isinstance(als, list):
+        return [str(x).strip() for x in als if x is not None and str(x).strip()]
+    if isinstance(als, str):
+        s = als.strip()
+        # JSON 或 {a,b} 风格
+        try:
+            if (s.startswith("[") and s.endswith("]")) or (s.startswith("{") and s.endswith("}")):
+                j = json.loads(s.replace("{", "[").replace("}", "]"))
+                if isinstance(j, list):
+                    return [str(x).strip() for x in j if x is not None and str(x).strip()]
+        except Exception:
+            pass
+        # 退化分割
+        s2 = s.strip("{}")
+        parts = re.split(r'[,\|/;；，、\s]+', s2)
+        return [p.strip().strip('"').strip("'") for p in parts if p.strip()]
+    return []
 
 def _to_alias_list(als) -> List[str]:
     """把 aliases 列统一转成 list[str]，兼容 JSON 字符串 / Postgres 数组文本 / 逗号分隔"""
@@ -140,10 +125,6 @@ def _gen_variants(name: str) -> List[str]:
 def _norm(s: str) -> str:
     """统一大小写并去空白"""
     return re.sub(r"\s+", "", (s or "")).lower()
-
-def _has_any(s: str, kws: list[str]) -> bool:
-    ss = s or ""
-    return any(k in ss for k in kws)
 
 # --- helpers for relative time inference ---
 def _latest_period(company: Optional[str] = None, metric: Optional[str] = None):
@@ -220,6 +201,26 @@ def _now_sgt():
 _ALIAS_CACHE: Dict[str,Dict[str,Any]] = {}
 
 def load_metric_alias_cache(force: bool=False):
+    """Cache canonical -> meta (for name matching / unit only)"""
+    global _ALIAS_CACHE
+    if _ALIAS_CACHE and not force:
+        return
+    rows = _sb_safe("metric_alias_catalog", {
+        "select": "canonical_name,aliases,unit,is_derived,compute_key"
+    })
+    cache: Dict[str,Dict[str,Any]] = {}
+    for r in rows:
+        als = _to_alias_list(r.get("aliases"))
+
+        cache[str(r["canonical_name"])] = {
+            "aliases": als,
+            "unit": r.get("unit"),
+            "is_derived": bool(r.get("is_derived")),
+            "compute_key": r.get("compute_key") or r["canonical_name"],
+        }
+    _ALIAS_CACHE = cache
+
+def load_metric_alias_cache(force: bool=False):
     global _ALIAS_CACHE
     if _ALIAS_CACHE and not force:
         return
@@ -250,20 +251,26 @@ def match_metric_canonical(text: str) -> Optional[str]:
     if not qn:
         return None
 
+    # 问句是否在谈“增长”
     q_has_growth = _has_any(q, GROWTH_KWS)
 
     best_name, best_score = None, -1e9
     for canonical, meta in _ALIAS_CACHE.items():
         names = [canonical] + meta["aliases"]
+        # 候选是否“增长类”
         cand_has_growth = _has_any(canonical, GROWTH_KWS) or any(_has_any(a, GROWTH_KWS) for a in names)
 
-        base = -1e6
+        # 基础得分：看每个别名在问题中的命中情况
+        base = -1e6  # 默认很低（未命中）
         for n in names:
             ns = _norm(n)
             if not ns:
                 continue
             if ns in qn or qn in ns:   # 双向包含
+                # 以命中别名长度为主的分
                 base = max(base, len(ns) * 10)
+
+                # 精确词边界（更像“整词命中”）再加点分
                 try:
                     if re.search(rf'(?<![\w\u4e00-\u9fff]){re.escape(n)}(?![\w\u4e00-\u9fff])', q):
                         base = max(base, len(ns) * 12)
@@ -271,19 +278,22 @@ def match_metric_canonical(text: str) -> Optional[str]:
                     pass
 
         if base < 0:
-            continue
+            continue  # 这个候选没命中，跳过
 
+        # 语义惩罚/加分
         penalty = 0
         if cand_has_growth and not q_has_growth:
-            penalty -= 1000
+            penalty -= 1000  # 重点：没有提“增长”，禁止挑增长类
         elif q_has_growth and not cand_has_growth:
-            penalty -= 20
+            penalty -= 20    # 问了增长，但候选不是增长类，轻扣
 
         score = base + penalty
         if score > best_score:
             best_name, best_score = canonical, score
 
     return best_name
+
+
 
 def metric_meta(canonical: str) -> Optional[Dict[str,Any]]:
     load_metric_alias_cache()
@@ -302,17 +312,23 @@ def load_company_catalog_cache(force: bool=False):
         rows = _sb_safe("company_catalog", {"select": "display_name,aliases"})
     cache: Dict[str,Dict[str,Any]] = {}
     for r in rows:
-        canonical = (r.get("display_name"))
+        canonical = (
+            r.get("display_name")
+        )
         if not canonical:
             continue
         als = _to_alias_list(r.get("aliases"))
+        # 把 display_name 及其变体也加入别名池
         disp = r.get("display_name")
         for v in _gen_variants(canonical) + _gen_variants(disp or ""):
             if v and v != canonical:
                 als.append(v)
+        # 去重
         seen = set(); als = [a for a in als if not (a in seen or seen.add(a))]
         cache[str(canonical)] = {"aliases": als}
     _COMPANY_CACHE = cache
+
+
 
 def match_company_name(text: str) -> Optional[str]:
     load_company_catalog_cache()
@@ -323,6 +339,7 @@ def match_company_name(text: str) -> Optional[str]:
     best_len = 0
     for canonical, meta in _COMPANY_CACHE.items():
         names = [canonical] + meta.get("aliases", [])
+        # 给每个别名也生成一轮“变体”
         expanded = set()
         for n in names:
             expanded.update([n, *_gen_variants(n)])
@@ -330,10 +347,12 @@ def match_company_name(text: str) -> Optional[str]:
             ns = _norm(n)
             if not ns:
                 continue
+            # 双向：alias ⊆ question 或 question ⊆ alias
             if ns in t or t in ns:
                 if len(ns) > best_len:
                     best, best_len = canonical, len(ns)
     return best
+
 
 # ---------------- Lightweight parser (兜底) ---------------- #
 YEAR_RE = re.compile(r"(20\d{2})")
@@ -377,19 +396,6 @@ def fetch_metric_value(company_name: str, year: int, quarter: int, metric_name: 
         except Exception:
             return None
     return None
-
-# 新增：一次把同列的比较值取出来
-def fetch_metric_row(company_name: str, year: int, quarter: int, metric_name: str) -> Optional[Dict[str,Any]]:
-    params = {
-        "select": "metric_value,baseline_target,last_year_value,last_period_value,source",
-        "company_name": f"eq.{company_name}",
-        "year": f"eq.{int(year)}",
-        "quarter": f"eq.{int(quarter)}",
-        "metric_name": f"eq.{metric_name}",
-        "limit": "1",
-    }
-    rows = _sb_safe("financial_metrics", params)
-    return rows[0] if rows else None
 
 # ---------------- Formula utils ---------------- #
 SAFE_FUNCS = {"abs": abs, "min": min, "max": max, "round": round, "sqrt": math.sqrt}
@@ -532,24 +538,19 @@ def _catalog_payload_for_llm():
     metrics   = [{"canonical_name": m, "aliases": _ALIAS_CACHE[m]["aliases"]} for m in _ALIAS_CACHE]
     return companies, metrics
 
-def llm_structured_parse(question: str) -> Dict[str, Any]:
-    start_ts = time.time()
+
+def llm_structured_parse(question: str) -> Dict[str,Any]:
     """
     调用 LLM：让其在给定 company/metric 选项内，产出 {company, metric, year, quarter}。
     失败时返回 {"need_clarification": True, "ask": "..."}。
-
-    兼容：
-    - gpt-5 / o4 / o3 → /responses + input（不发送 temperature）
-    - 其它模型（如 gpt-4o-mini）→ /chat/completions + messages（temperature=0）
     """
     if not (LLM_BASE and LLM_KEY and LLM_MODEL):
         return {"need_clarification": True, "ask": "未配置大模型参数。请提供公司、指标、年份与季度。"}
-
     companies, metrics = _catalog_payload_for_llm()
     now = _now_sgt().strftime("%Y-%m-%d")
     hint_any = _latest_period()
 
-    # —— 仍然保留你的提示词（原封不动） —— #
+    url = f"{LLM_BASE.rstrip('/')}/chat/completions"
     sys_prompt = (
         "你是财务语义解析器。你的任务是从用户问题中**抽取并规范化** 公司、指标、时间，并在不确定时给出单句最小追问。\n"
         "【输入】\n"
@@ -572,211 +573,36 @@ def llm_structured_parse(question: str) -> Dict[str, Any]:
         "companies": companies,
         "metrics": metrics,
         "question": question,
-        "output_format": {"company": "公司规范名", "metric": "指标规范名", "year": "int", "quarter": "1~4"},
+        "output_format": {"company":"公司规范名","metric":"指标规范名","year":"int","quarter":"1~4"}
     }
-
-    
-    # —— 根据模型名选择端点与 payload —— #
-    is_responses = str(LLM_MODEL).lower().startswith(("gpt-5", "o4", "o3"))
-    url = f"{LLM_BASE.rstrip('/')}/responses" if is_responses else f"{LLM_BASE.rstrip('/')}/chat/completions"
-
-    if is_responses:
-        # ✅ Responses API：使用 content-blocks，并给出 max_output_tokens
-        payload = {
-            "model": LLM_MODEL,
-            "input": [
-                {"role": "system", "content": [{"type": "input_text", "text": sys_prompt}]},
-                {"role": "user",   "content": [{"type": "input_text", "text": json.dumps(user_prompt, ensure_ascii=False)}]},
-            ],
-            "max_output_tokens": 1024
-        }
-    else:
-        payload = {
-            "model": LLM_MODEL,
-            "messages": [
-                {"role": "system", "content": sys_prompt},
-                {"role": "user",   "content": json.dumps(user_prompt, ensure_ascii=False)},
-            ],
-            "temperature": 0,
-        }
-
-
-
-    connect_to = globals().get("LLM_CONNECT_TIMEOUT", 30)
-    read_to    = globals().get("LLM_READ_TIMEOUT", 120)
-
+    payload = {
+        "model": LLM_MODEL,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user",   "content": json.dumps(user_prompt, ensure_ascii=False)}
+        ]
+    }
     try:
-        r = requests.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {LLM_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=(connect_to, read_to)
-        )
-
-        elapsed_ms = int((time.time() - start_ts) * 1000)
-        endpoint = "responses" if is_responses else "chat/completions"
-
-
-        if not r.ok:
-            reg = parse_question(question)
-            return {
-                "company": reg.get("company"),
-                "metric": reg.get("metric"),
-                "year": reg.get("year"),
-                "quarter": reg.get("quarter"),
-                "need_clarification": True,
-                "ask": "请补充公司、指标或时间（年/季）。",
-                "_debug": {"ok": False, "status": r.status_code, "endpoint": endpoint,
-                        "elapsed_ms": elapsed_ms, "model": LLM_MODEL}
-            }
-
-        data = r.json()
-
-        # —— 统一抽取文本 —— #
-        text = None
-        if isinstance(data, dict) and "output_text" in data:  # responses 直出
-            text = data.get("output_text")
-        if text is None and isinstance(data, dict) and data.get("choices"):
-            ch0 = data["choices"][0]
-            text = (ch0.get("message") or {}).get("content") or ch0.get("text")
-        if text is None and isinstance(data, dict) and data.get("output"):
-            try:
-                parts = data["output"][0].get("content", [])
-                texts = [p.get("text") for p in parts if isinstance(p, dict) and p.get("text")]
-                text = "\n".join(texts) if texts else None
-            except Exception:
-                pass
-        if (not text) and is_responses:
-            # ⚠️ 某些网关在 /responses 不回 output_text，这里回退一次到 /chat/completions
-            try:
-                url2 = f"{LLM_BASE.rstrip('/')}/chat/completions"
-                payload2 = {
-                    "model": LLM_MODEL,
-                    "messages": [
-                        {"role": "system", "content": sys_prompt},
-                        {"role": "user",   "content": json.dumps(user_prompt, ensure_ascii=False)},
-                    ],
-                    "temperature": 0,
-                }
-                r2 = requests.post(
-                    url2,
-                    headers={"Authorization": f"Bearer {LLM_KEY}","Content-Type":"application/json"},
-                    json=payload2, timeout=(connect_to, read_to)
-                )
-                if r2.ok:
-                    d2 = r2.json()
-                    ch0 = (d2.get("choices") or [{}])[0]
-                    text = (ch0.get("message") or {}).get("content") or ch0.get("text")
-                    endpoint = "chat/completions"
-                    r = r2  # 下面 _debug 用到 status
-            except Exception:
-                pass
-
-        if not text:
-            raise ValueError("empty LLM text")
-
-        # —— 你的原始 JSON 清洗逻辑（保留） —— #
-        content = re.sub(r"```json|```", "", text).strip()
-        # 尝试直接 loads；失败再做一个简单提取
-        try:
-            data_obj = json.loads(content)
-        except Exception:
-            m = re.search(r"\{[\s\S]*\}", content)
-            if not m:
-                raise
-            data_obj = json.loads(m.group(0))
-
+        r = requests.post(url, headers={"Authorization": f"Bearer {LLM_KEY}", "Content-Type": "application/json"}, json=payload, timeout=30)
+        r.raise_for_status()
+        content = r.json()["choices"][0]["message"]["content"].strip()
+        content = re.sub(r"```json|```", "", content)
+        data = json.loads(content)
     except Exception as e:
-    
         print("[llm parse warn]", e)
         reg = parse_question(question)
-    # [ADD] 把失败也当作一次 LLM 调用写进 _debug，便于前端显示原因
-        return {
-        "company": reg.get("company"),
-        "metric": reg.get("metric"),
-        "year": reg.get("year"),
-        "quarter": reg.get("quarter"),
-        "need_clarification": True,
-        "ask": "请补充公司、指标或时间（年/季）。",
-        "_debug": {
-            "ok": False,
-            "endpoint": "responses" if is_responses else "chat/completions",
-            "model": LLM_MODEL
-        }
-    }
+        return {"company": reg.get("company"), "metric": reg.get("metric"), "year": reg.get("year"), "quarter": reg.get("quarter")}
 
+    if data.get("need_clarification"):
+        return {"need_clarification": True, "ask": data.get("ask") or "请补充公司、指标或时间（年/季）。"}
 
-    if data_obj.get("need_clarification"):
-        return {"need_clarification": True, "ask": data_obj.get("ask") or "请补充公司、指标或时间（年/季）。"}
+    comp = data.get("company")
+    metr = data.get("metric")
+    year = data.get("year")
+    q    = _parse_quarter_to_int(data.get("quarter"))
 
-    comp = data_obj.get("company")
-    metr = data_obj.get("metric")
-    year = data_obj.get("year")
-    q    = _parse_quarter_to_int(data_obj.get("quarter"))
-
-    data_obj["_debug"] = {"ok": True, "status": r.status_code, "endpoint": endpoint,
-                        "elapsed_ms": elapsed_ms, "model": LLM_MODEL}
-    # 统一 quarter 为 1~4 的整数，避免后续解析异常
-    if q is not None:
-        data_obj["quarter"] = q
-    return data_obj
-
-    #return {"company": comp, "metric": metr, "year": year, "quarter": q}
-
-
-# ---------------- Indicator Card helper ---------------- #
-def build_indicator_card(row: Dict[str,Any],
-                         unit: Optional[str],
-                         company_name: str,
-                         year: int,
-                         quarter_int: int,
-                         metric_name: str) -> Dict[str,Any]:
-    """
-    由数据表同行的列计算指标卡（当前值/同比差/环比差/与目标差距）。
-    差值方向：当前值 - 对比值（正数=高于对比）。
-    """
-    cur = row.get("metric_value", None)
-    tgt = row.get("baseline_target", None)
-    yoy_base = row.get("last_year_value", None)
-    qoq_base = row.get("last_period_value", None)
-
-    def _delta(a, b):
-        try:
-            if a is None or b is None: return None
-            return float(a) - float(b)
-        except Exception:
-            return None
-
-    yoy_delta = _delta(cur, yoy_base)
-    qoq_delta = _delta(cur, qoq_base)
-    gap_delta = _delta(cur, tgt)
-
-    return {
-        "company": company_name,
-        "time": f"{year}Q{quarter_int}",
-        "metric": metric_name,
-        "unit": unit,
-        "current": cur,
-        "current_str": fmt_num(cur) if cur is not None else None,
-        "yoy_delta": yoy_delta,
-        "yoy_delta_str": fmt_num(yoy_delta) if yoy_delta is not None else None,
-        "qoq_delta": qoq_delta,
-        "qoq_delta_str": fmt_num(qoq_delta) if qoq_delta is not None else None,
-        "target_gap": gap_delta,  # 当前 - 目标（>0 表示超目标，<0 表示低于目标）
-        "target_gap_str": fmt_num(gap_delta) if gap_delta is not None else None,
-        "refs": {
-            "baseline_target": tgt,
-            "baseline_target_str": fmt_num(tgt) if tgt is not None else None,
-            "last_year_value": yoy_base,
-            "last_year_value_str": fmt_num(yoy_base) if yoy_base is not None else None,
-            "last_period_value": qoq_base,
-            "last_period_value_str": fmt_num(qoq_base) if qoq_base is not None else None,
-            "source": row.get("source")
-        }
-    }
+    return {"company": comp, "metric": metr, "year": year, "quarter": q}
 
 # ---------------- API ---------------- #
 class QueryReq(BaseModel):
@@ -793,71 +619,40 @@ class QueryResp(BaseModel):
     resolved: Optional[Dict[str,Any]] = None
     value: Optional[Dict[str,Any]] = None
     formula: Optional[Dict[str,Any]] = None
-    indicator_card: Optional[Dict[str,Any]] = None
     message: Optional[str] = None
-    # 新增：用于前端显露 3 个检查项 + 过程
-    debug: Optional[Dict[str,Any]] = None
-    steps: Optional[List[Dict[str,Any]]] = None
-
-
 
 @app.post("/metrics/query", response_model=QueryResp)
 def metrics_query(req: QueryReq, _=Depends(require_token)):
-    steps: List[Dict[str,Any]] = []
-
-    # —— 显式 quarter 先规范化
-    quarter_int_explicit = _parse_quarter_to_int(req.quarter)
-
-    # —— 是否需要 LLM（缺任一项就需要）
-    need_llm = not (req.metric and req.company and req.year and quarter_int_explicit)
-
-    # —— 调试容器
-    dbg: Dict[str, Any] = {"need_llm": need_llm}
-
-    # —— 只有缺项时才调 LLM/正则
+    # 1) 优先走 LLM 结构化解析
     parsed: Dict[str,Any] = {}
-    reg: Dict[str,Any] = {}
-    if need_llm and req.question:
+    if req.question:
         parsed = llm_structured_parse(req.question)
-        reg = parse_question(req.question or "")
-        llm_dbg = parsed.get("_debug") if isinstance(parsed, dict) else None
-        steps.append({"stage": "llm_first", "called": True, "ok": bool(llm_dbg and llm_dbg.get("ok")),
-                    "endpoint": (llm_dbg or {}).get("endpoint"), "elapsed_ms": (llm_dbg or {}).get("elapsed_ms")})
-        dbg["llm_first"] = llm_dbg
 
-    # —— 合并（显式 > LLM > 正则）
+    # 2) 合并参数（显式优先，其次 LLM，最后兜底正则）
+    reg = parse_question(req.question or "")
     metric_raw   = req.metric or parsed.get("metric")  or reg.get("metric")
     company_name = req.company or parsed.get("company") or reg.get("company")
     year         = req.year    or parsed.get("year")    or reg.get("year")
-    quarter_int  = quarter_int_explicit or parsed.get("quarter") or reg.get("quarter")
-
+    quarter_int  = _parse_quarter_to_int(req.quarter) or parsed.get("quarter") or reg.get("quarter")
     # --- relative time smart fallback ---
+    # 先把公司/指标对齐到 catalog（供时间推断使用）
     canon_company = match_company_name(company_name) if company_name else None
+    # 用“原始 metric 片段 + 问题全文”联合匹配，尽量还原用户语义
     metric_text_for_match = " ".join([t for t in [metric_raw, req.question] if t])
     canon_metric = match_metric_canonical(metric_text_for_match) or (metric_raw or None)
-    # 3.1) LLM 二次兜底：若规范化仍失败（或 metric 无法从别名表命中），用 LLM 再解析一次
-    if req.question and (not canon_metric or not canon_company):
-        parsed2 = llm_structured_parse(req.question)
-        # 用 LLM 结果回填缺项
-        company_name = company_name or parsed2.get("company")
-        metric_raw   = metric_raw   or parsed2.get("metric")
-        year         = year         or parsed2.get("year")
-        quarter_int  = quarter_int  or parsed2.get("quarter")
-        # 重新规范化（允许用 question 参与匹配放宽）
-        canon_company = (match_company_name(company_name) or company_name) if company_name else None
-        canon_metric  = (match_metric_canonical(metric_raw or req.question) or metric_raw) if (metric_raw or req.question) else None
-        llm_dbg2 = parsed2.get("_debug") if isinstance(parsed2, dict) else None
-        steps.append({"stage": "llm_second", "called": True, "ok": bool(llm_dbg2 and llm_dbg2.get("ok")),
-              "endpoint": (llm_dbg2 or {}).get("endpoint"), "elapsed_ms": (llm_dbg2 or {}).get("elapsed_ms")})
-        dbg["llm_second"] = llm_dbg2
+
+
     if (not year or not quarter_int) and req.question and _has_relative(req.question):
         y2, q2 = _infer_time_from_db(req.question, canon_company, canon_metric)
         year = year or y2
         quarter_int = quarter_int or q2
 
-    # 3) catalog 规范化（若没命中仍保留原文以便 financial_metrics 能命中）
+    # 3) 公司/指标对齐到 catalog（若 LLM 返回了别名/简称，这里强制规范化）
+    # 如果 catalog 没命中，也先用原始 company 继续查（只要 financial_metrics 里有就能命中）
+    # 规范化（命中 catalog 用规范名；否则用原文继续查）
     canon_company = (match_company_name(company_name) or company_name) if company_name else None
     canon_metric  = (match_metric_canonical(metric_raw) or metric_raw) if metric_raw else None
+
 
     # 4) 缺项则明确追问
     missing = []
@@ -867,12 +662,7 @@ def metrics_query(req: QueryReq, _=Depends(require_token)):
     if not quarter_int:   missing.append("季度（Q1-Q4）")
     if missing:
         ask = "请补充：" + "、".join(missing) + "。"
-        dbg["resolved_partial"] = {
-            "metric_raw": metric_raw, "company_raw": company_name,
-            "year": year, "quarter": quarter_int
-        }
-        return QueryResp(need_clarification=True, ask=ask, debug=dbg, steps=steps)
-
+        return QueryResp(need_clarification=True, ask=ask)
 
     # 5) 构造 resolved
     meta = metric_meta(canon_metric) or {}
@@ -884,41 +674,25 @@ def metrics_query(req: QueryReq, _=Depends(require_token)):
         "quarter": q_label,
         "scenario": req.scenario or "actual",
     }
-    dbg["resolved"] = resolved
-    # 6) 优先直取（并携带指标卡）
-    row = fetch_metric_row(canon_company, int(year), int(quarter_int), canon_metric)
-    if row and (row.get("metric_value") is not None):
-        cur_val = None
-        try:
-            cur_val = float(row["metric_value"])
-        except Exception:
-            pass
-        card = build_indicator_card(row, meta.get("unit"), canon_company, int(year), int(quarter_int), canon_metric)
-        dbg["fetch_ok"] = True
-        dbg["fetch_mode"] = "direct"
-        dbg["source"] = row.get("source")
+
+    # 6) 先直取
+    val = fetch_metric_value(canon_company, int(year), int(quarter_int), canon_metric)
+    if val is not None:
         return QueryResp(
             resolved=resolved,
-            value={"metric_name": canon_metric, "metric_value": cur_val, "unit": meta.get("unit")},
-            indicator_card=card,
-            message="直取完成",
-            debug=dbg, steps=steps
+            value={"metric_name": canon_metric, "metric_value": val, "unit": meta.get("unit")},
+            message="直取完成"
         )
 
-
-    # 7) 再尝试公式（保持原逻辑，不构造指标卡）
+    # 7) 再尝试公式
     fml = load_formula(canon_metric)
     if not fml:
-        dbg["fetch_ok"] = False
-        dbg["fetch_mode"] = "formula_missing"
         return QueryResp(
             need_clarification=True,
             ask=f"未查到『{canon_metric}』的数值，且 metric_formulas 中无该指标公式。请先在 metric_formulas 上传 {canon_metric} 的公式（variables/compute），然后再试。",
             resolved=resolved,
-            message="未找到直取值 & 缺少公式",
-            debug=dbg, steps=steps
+            message="未找到直取值 & 缺少公式"
         )
-
 
     variables = fml.get("variables") or {}
     compute   = fml.get("compute") or {}
@@ -929,49 +703,35 @@ def metrics_query(req: QueryReq, _=Depends(require_token)):
         try: compute = json.loads(compute)
         except Exception: compute = {}
 
+    # 公式计算（递归缺啥补啥）
     try:
         result, steps_values, base_values, result_var = compute_by_formula(
             canon_metric, variables, compute,
             lambda base_cn: compute_or_fetch_metric(canon_company, int(year), int(quarter_int), base_cn, 1),
             env_hint={"company_name": canon_company, "year": int(year), "quarter": q_label}
         )
-        dbg["fetch_ok"] = True
-        dbg["fetch_mode"] = "formula"
         expr, substituted, table = make_expression(canon_metric, result_var, steps_values, variables, compute)
         return QueryResp(
             resolved=resolved,
             formula={"expression": expr, "substituted": substituted, "result": result, "result_str": fmt_num(result), "table": table},
-            message="公式计算完成", debug=dbg, steps=steps
+            message="公式计算完成",
         )
     except HTTPException as e:
-        dbg["fetch_ok"] = False
-        dbg["fetch_mode"] = "formula_need_base"
+        # 可能是基础指标缺失，给出最小提示
         return QueryResp(
             need_clarification=True,
             ask=f"计算『{canon_metric}』需要的基础指标缺失：{str(e.detail)}。请补充相关基础指标或完善公式后再试。",
             resolved=resolved,
-            message="公式所需基础指标缺失", debug=dbg, steps=steps
+            message="公式所需基础指标缺失"
         )
     except Exception as e:
-        dbg["fetch_ok"] = False
-        dbg["fetch_mode"] = "formula_error"
+        # 其他解析失败
         return QueryResp(
             need_clarification=True,
             ask=f"『{canon_metric}』公式解析失败：{e}。请检查公式表。",
             resolved=resolved,
-            message="公式解析失败", debug=dbg, steps=steps
+            message="公式解析失败"
         )
-@app.get("/llm/ping")
-def llm_ping():
-    if not (LLM_BASE and LLM_KEY and LLM_MODEL):
-        raise HTTPException(400, "LLM 未配置（OPENAI_* / LLM_*）")
-    try:
-        r = requests.get(f"{LLM_BASE}/models",
-                         headers={"Authorization": f"Bearer {LLM_KEY}"},
-                         timeout=10)
-        return {"ok": r.ok, "status": r.status_code, "model": LLM_MODEL, "base": LLM_BASE}
-    except Exception as e:
-        raise HTTPException(502, f"LLM ping failed: {e}")
 
 @app.get("/healthz")
 def healthz():

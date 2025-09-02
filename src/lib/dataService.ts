@@ -1198,37 +1198,53 @@ export async function listCanonicalMetrics(companyName?: string): Promise<string
 /** 公司下拉：列出 financial_metrics 里出现过的公司 */
 export async function listCompanies(): Promise<string[]> {
   try {
+    // 统一从 company_catalog 读取可选公司（与维度下钻的映射口径保持一致）
     const { data, error } = await supabase
+      .from('company_catalog')
+      .select('display_name')
+      .order('display_name', { ascending: true })
+      .limit(5000);
+    if (error) throw error;
+
+    const arr = Array.from(
+      new Set((data || []).map((r: any) => r?.display_name).filter(Boolean))
+    ) as string[];
+    if (arr.length) return arr;
+
+    // 兜底：若表暂时为空，回退到历史 metrics 列表（兼容旧库）
+    const { data: fm, error: e2 } = await supabase
       .from('financial_metrics')
       .select('company_name')
       .limit(10000);
-    if (error) throw error;
-
-    const set = new Set<string>();
-    (data || []).forEach((r: any) => r?.company_name && set.add(String(r.company_name)));
-    const arr = Array.from(set);
-    arr.sort((a, b) => a.localeCompare(b, 'zh-CN'));
-    return arr.length ? arr : ['XX集团公司'];
+    if (e2) throw e2;
+    const backup = Array.from(new Set((fm || []).map((r: any) => r?.company_name).filter(Boolean))) as string[];
+    backup.sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    return backup.length ? backup : ['XX集团公司'];
   } catch {
     return ['XX集团公司'];
   }
 }
+
 
 /** 指标库：metric_alias_catalog（支持关键字模糊） */
 export async function listMetricAliases(keyword?: string): Promise<MetricAliasItem[]> {
   try {
     let q = supabase
       .from('metric_alias_catalog')
-      .select('canonical_name, unit, description')
+      .select('canonical_name,unit')        // 仅选稳定列，避免环境差异导致 400
       .limit(5000);
     if (keyword && keyword.trim()) {
       q = q.ilike('canonical_name', `%${keyword.trim()}%`);
     }
     const { data, error } = await q;
     if (error) throw error;
-    return (data || []) as MetricAliasItem[];
+
+    return (data || []).map((r: any) => ({
+      canonical_name: r?.canonical_name,
+      unit: r?.unit ?? undefined,
+      description: null                     // 统一置空，兼容 UI typing
+    })) as MetricAliasItem[];
   } catch {
-    // 兜底常用指标，保证弹窗可用
     return [
       { canonical_name: '营业收入', unit: '万元', description: null },
       { canonical_name: '净利润', unit: '万元', description: null },
@@ -1238,4 +1254,18 @@ export async function listMetricAliases(keyword?: string): Promise<MetricAliasIt
     ];
   }
 }
+
+export async function loadCompanyCatalog(): Promise<Array<{
+  id: string; parent_id: string | null; company_id: string | null;
+  display_name: string; aliases: string[] | null
+}>> {
+  const { data, error } = await supabase
+    .from('company_catalog')
+    .select('id,parent_id,company_id,display_name,aliases')
+    .order('id', { ascending: true })
+    .limit(5000);
+  if (error) throw error;
+  return (data || []) as any[];
+}
+
 
