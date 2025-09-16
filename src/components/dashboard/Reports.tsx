@@ -14,10 +14,17 @@ import {
   deleteTemplate,
   exportDocument,
   getReportTypes,
+  listReportUploads,
+  uploadReportFile,
+  deleteReportUpload,
+  generateFreeReport,
+  type ReportUploadRow,
   type ReportGenerationParams,
   type ReportGenerationResult,
   type ReportTemplateRow
 } from '@/lib/dataService';
+
+
 import { Markdown } from '@/components/ui/Markdown';
 import { supabase } from '@/lib/supabase';
 import toast from 'react-hot-toast';
@@ -149,6 +156,29 @@ const AGENT_TOKEN = (
   (import.meta as any).env?.VITE_REPORT_AGENT_TOKEN ||
   'dev-secret-01'
 );
+// —— 把 DB 模板结构转换为 Markdown 模板文本，便于喂给后端（template_text）
+function buildTemplateTextFromDBTemplate(tpl: ReportTemplateRow | null | undefined): string {
+  if (!tpl || !tpl.template_data) return '';
+  const td: any = tpl.template_data || {};
+  const name = tpl.name || td.name || '报告模板';
+  const sections = Array.isArray(td.sections) ? td.sections : [];
+  let out = `# ${name}\n\n`;
+  sections.forEach((s: any, i: number) => {
+    const title = (s?.title || `第${i + 1}部分`).toString();
+    out += `## ${title}\n`;
+    if (s?.hint) out += `> ${String(s.hint).trim()}\n\n`;
+    const kms = Array.isArray(s?.keyMetrics)
+      ? s.keyMetrics
+      : (typeof s?.keyMetrics === 'string'
+          ? s.keyMetrics.split(',').map((x: string) => x.trim()).filter(Boolean)
+          : []);
+    if (kms.length) out += `**重点指标：** ${kms.join('、')}\n\n`;
+    if (s?.requireCharts) out += `（此处需要图表）\n\n`;
+    out += '\n';
+  });
+  return out.trim();
+}
+
 
 const Reports: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>('template');
@@ -192,6 +222,21 @@ const Reports: React.FC = () => {
   const [naturalLanguageInput, setNaturalLanguageInput] = useState('');
   const [isNaturalGenerating, setIsNaturalGenerating] = useState(false);
   const [generationProgress, setGenerationProgress] = useState(0);
+  // 折叠面板：已上传文件
+  const [openUploads, setOpenUploads] = useState(true);
+
+  // 首次进入时拉取“已上传文件”列表
+  useEffect(() => {
+    (async () => {
+      try {
+        const rows = await listReportUploads();
+        setUploads(rows);
+        if (rows && rows.length > 0) setOpenUploads(true);
+      } catch (e) {
+        console.warn('listReportUploads failed', e);
+      }
+    })();
+  }, []);
 
   // === Beautify Agent base ===
   const BEAUTIFY_BASE = (
@@ -204,22 +249,24 @@ const Reports: React.FC = () => {
   const [beautifyOptions, setBeautifyOptions] = useState({
     instructions: '',
     font_family: 'Inter, "Microsoft YaHei", system-ui, sans-serif',
-    base_font_size: 16,
+    base_font_size: 13,
     line_height: 1.75,
     paragraph_spacing_px: 8,
-    content_width_px: 920,
+    content_width_px: 1920,
     theme: 'light' as 'light'|'dark',
     palette: '#2563eb,#10b981,#f59e0b,#ef4444,#8b5cf6',
   });
-  const [beautifyResult, setBeautifyResult] = useState<{
-    html?: string,
-    html_url?: string,
-    html_download_url?: string,
-    docx_url?: string,
-    docx_download_url?: string,
-    pdf_url?: string,
-    pdf_download_url?: string
-  } | null>(null);
+const [beautifyResult, setBeautifyResult] = useState<{
+  html?: string,
+  html_url?: string,
+  html_download_url?: string,
+  docx_url?: string,
+  docx_download_url?: string,
+  pdf_url?: string,
+  pdf_download_url?: string,
+  pptx_url?: string,                // ✅ 新增
+  pptx_download_url?: string        // ✅ 新增
+} | null>(null);
 
   const [streamStage, setStreamStage] = useState<string>('');  // 阶段进度文案
 
@@ -232,6 +279,10 @@ const Reports: React.FC = () => {
   const [endQuarter, setEndQuarter] = useState<typeof QUARTERS[number] | ''>('');
   const [language, setLanguage] = useState<'zh-CN'|'en-US'>('zh-CN');
   const [specialRequirements, setSpecialRequirements] = useState<string>('');
+  const [uploads, setUploads] = useState<ReportUploadRow[]>([]);
+  const [selectedUploadIds, setSelectedUploadIds] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null);
@@ -243,6 +294,43 @@ const Reports: React.FC = () => {
     const cur = new Date().getFullYear();
     return Array.from({length: cur - 2011}, (_,i)=>cur - i);
   }, []);
+  const pickUpload = () => uploadInputRef.current?.click();
+
+  const onUploadsChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || !files.length) return;
+    setUploading(true);
+    try {
+      for (const f of Array.from(files)) {
+        const row = await uploadReportFile(f);
+        setUploads(prev => [row, ...prev]);
+        setOpenUploads(true); 
+      }
+    } catch (err: any) {
+      alert(`上传失败：${err?.message || err}`);
+    } finally {
+      setUploading(false);
+      if (uploadInputRef.current) uploadInputRef.current.value = '';
+    }
+  };
+
+  const toggleSelectUpload = (id: string) => {
+    setSelectedUploadIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  };
+
+  const removeUploadFile = async (id: string, name: string) => {
+    const ok = confirm(`删除文件：${name} ?`);
+    if (!ok) return;
+    try {
+      await deleteReportUpload(id);
+      setUploads(prev => prev.filter(x => x.id !== id));
+      setSelectedUploadIds(prev => prev.filter(x => x !== id));
+    } catch (err: any) {
+      alert(`删除失败：${err?.message || err}`);
+    }
+  };
+
+
 
   const quickSuggestions = [
     '生成2024年Q3季度财务业绩报告，重点分析营收增长和盈利能力变化',
@@ -541,28 +629,67 @@ const Reports: React.FC = () => {
   };
 
   const handleNaturalLanguageGenerate = async () => {
-    if (!naturalLanguageInput.trim()) return toast.error('请输入报告需求描述');
-    if (naturalLanguageInput.trim().length < 10) return toast.error('请提供更详细的需求描述（至少10个字符）');
-    setIsNaturalGenerating(true); setGenerationProgress(0);
+    const prompt = naturalLanguageInput.trim();
+    if (!prompt) return toast.error('请输入报告需求描述');
+    if (prompt.length < 10) return toast.error('请提供更详细的需求描述（至少10个字符）');
+
+    setIsNaturalGenerating(true);
+    setGenerationProgress(0);
+    const tick = setInterval(()=>setGenerationProgress(p => p < 95 ? p + 5 : p), 200);
+
     try {
-      const progress = setInterval(()=>setGenerationProgress(p=>p<90? p+10 : p), 200);
-      const { data, error } = await supabase.functions.invoke('natural-language-report-generator', {
-        body: { naturalLanguageDescription: naturalLanguageInput, reportContext:{ timestamp:new Date().toISOString(), language }, userPreferences:{ format:'markdown', style:'comprehensive' } }
+        // —— 仅按用户输入 + 附件 + 可选检索生成（不套模板）
+        // —— 计算一个简易 period 标签（可选）
+      const periodLabel =
+        (startYear && startQuarter && endYear && endQuarter)
+          ? `${startYear}${String(startQuarter)}–${endYear}${String(endQuarter)}`
+          : undefined;
+
+      // —— 传给后端的元信息（自由生成用来定语气/口径，可按需增减）
+      const meta = {
+        company_name: selectedCompany || undefined,
+        period: periodLabel,
+        locale: (language === 'zh-CN' ? 'zh-CN' : 'en-US'),
+        tone: 'formal',
+        chart_style: 'minimal',
+      };
+      const res = await generateFreeReport({
+        prompt,
+        selected_file_ids: selectedUploadIds,
+        allow_web_search: true,
+        language: (language === 'zh-CN' ? 'zh' : 'en'),
+        meta
       });
-      clearInterval(progress); setGenerationProgress(100);
-      if (error) throw error;
-      if (!data?.reportContent) throw new Error('生成的报告内容为空');
-      setReportContent(data.reportContent);
+
+
+
+      clearInterval(tick);
+      setGenerationProgress(100);
+
+      if (!res?.content_md) throw new Error('生成内容为空');
+
+      setReportContent(res.content_md);
       setGeneratedReport({
-        success: true, content: data.reportContent,
-        generatedAt: data.metadata?.generatedAt || new Date().toISOString(),
-        metadata: data.metadata || {}, reportId: 'nl-' + Date.now(), downloadUrl: '', fileName: 'natural-language-report.md'
-      } as ReportGenerationResult);
-      setCurrentView('editor'); toast.success('AI报告生成成功');
-    } catch (err) {
-      console.error(err); toast.error('报告生成失败，请重试');
-    } finally { setIsNaturalGenerating(false); setGenerationProgress(0); }
+        success: true,
+        content: res.content_md,
+        generatedAt: res.generated_at || new Date().toISOString(),
+        metadata: { attachments_used: res.attachments_used, web_refs: res.web_refs },
+        reportId: res.job_id || ('nl-' + Date.now()),
+        fileName: 'natural-language-report.md',
+      } as any);
+
+      setCurrentView('preview');
+      toast.success('AI 报告生成成功');
+    } catch (err: any) {
+      clearInterval(tick);
+      setGenerationProgress(0);
+      console.error(err);
+      toast.error(`报告生成失败：${err?.message || err}`);
+    } finally {
+      setIsNaturalGenerating(false);
+    }
   };
+
 
   const handleExport = async (format: string) => {
     if (!reportContent) return toast.error('没有可导出的内容');
@@ -623,8 +750,11 @@ const Reports: React.FC = () => {
         docx_url: data.docx_url,
         docx_download_url: data.docx_download_url,
         pdf_url: data.pdf_url,
-        pdf_download_url: data.pdf_download_url
+        pdf_download_url: data.pdf_download_url,
+        pptx_url: data.pptx_url,                         // ✅ 新增
+        pptx_download_url: data.pptx_download_url       // ✅ 新增（后端若没返回会自动走兜底）
       });
+
       toast.success('美化完成');
     } catch (e:any) {
       console.error(e);
@@ -696,6 +826,13 @@ const getNextCopyName = (base: string, existing: string[]) => {
   const copyToClipboard = (t: string) => { navigator.clipboard.writeText(t); toast.success('已复制到剪贴板'); };
 
   function renderCurrentView() {
+    // ✅ 自然语言页：setup 用引导面板；editor/preview 复用现有编辑/预览
+    if (activeTab === 'natural_language') {
+      if (currentView === 'preview') return renderPreviewView();
+      if (currentView === 'editor')  return renderEditorView();
+      return renderNaturalLanguageTab(); // setup/default
+    }
+    // 模板页维持原逻辑
     switch (currentView) {
       case 'setup': return renderTemplateTab();
       case 'editor': return renderEditorView();
@@ -703,6 +840,7 @@ const getNextCopyName = (base: string, existing: string[]) => {
       default: return renderTemplateTab();
     }
   }
+
 
   function renderTemplateTab() {
     return (
@@ -898,66 +1036,227 @@ const getNextCopyName = (base: string, existing: string[]) => {
   function renderNaturalLanguageTab() {
     return (
       <div className="flex w-full h-full">
-        {/* 左侧主要区域 */}
+        {/* 左侧主体：自然语言提问 */}
         <div className="flex-1 p-6 bg-white flex flex-col">
-          <div className="mb-6">
+          <div className="mb-6 space-y-2">
             <h2 className="text-xl font-semibold text-gray-900 mb-2 flex items-center space-x-2">
-              <Bot className="w-5 h-5 text-blue-600" /><span>自然语言报告生成</span>
+              <Bot className="w-5 h-5 text-blue-600" />
+              <span>自然语言报告生成</span>
             </h2>
-            <p className="text-gray-600">用自然语言描述您的报告需求，AI将为您智能生成专业报告</p>
+            <p className="text-gray-600">
+              用自然语言描述您的报告需求，AI 将为您智能生成专业报告
+            </p>
+
+
           </div>
 
-          <div className="mb-6">
+
+          {/* 提问输入框（主体） */}
+          <div className="mb-4">
             <label className="block text-sm font-medium text-gray-700 mb-2">报告需求描述</label>
-            <textarea ref={naturalInputRef} value={naturalLanguageInput} onChange={e=>setNaturalLanguageInput(e.target.value)}
-              placeholder="例如：请生成一份2024年第三季度的综合财务分析报告..." rows={6}
-              className="w-full border border-gray-300 rounded-lg px-4 py-3 text-gray-900 placeholder-gray-400 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none resize-none"
-              disabled={isNaturalGenerating}/>
+            <textarea
+              ref={naturalInputRef}
+              value={naturalLanguageInput}
+              onChange={(e) => setNaturalLanguageInput(e.target.value)}
+              placeholder="例如：请生成一份 2024 年第三季度的综合财务分析报告..."
+              rows={6}
+              className="w-full border border-gray-300 rounded-lg px-4 py-3 text-gray-900 placeholder-gray-400
+                        focus:border-blue-500 focus:ring-1 focus:ring-blue-500 focus:outline-none resize-none"
+              disabled={isNaturalGenerating}
+            />
             <div className="flex items-center justify-between mt-2">
-              <span className="text-xs text-gray-500">{naturalLanguageInput.length}/1000 字符 • 建议至少50字符</span>
+              <span className="text-xs text-gray-500">
+                {naturalLanguageInput.length}/1000 字符 • 建议至少 50 字
+              </span>
               {naturalLanguageInput && (
-                <button onClick={()=>copyToClipboard(naturalLanguageInput)}
-                        className="text-xs text-blue-600 hover:text-blue-700 flex items-center space-x-1">
-                  <Copy className="w-3 h-3" /><span>复制</span>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(naturalLanguageInput);
+                    toast.success('已复制到剪贴板');
+                  }}
+                  className="text-xs text-blue-600 hover:text-blue-700 flex items-center space-x-1"
+                >
+                  <Copy className="w-3 h-3" />
+                  <span>复制</span>
                 </button>
               )}
             </div>
           </div>
 
-          {isNaturalGenerating && (
-            <div className="mb-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
-              <div className="flex items-center mb-2">
-                <Bot className="w-5 h-5 text-blue-600 mr-2 animate-pulse" />
-                <span className="text-sm font-medium text-blue-700">AI正在生成报告...</span>
-              </div>
-              <div className="w-full bg-blue-200 rounded-full h-2">
-                <div className="bg-blue-600 h-2 rounded-full transition-all duration-300" style={{ width: `${generationProgress}%` }} />
-              </div>
-              <p className="text-xs text-blue-600 mt-1">正在分析需求并生成报告结构...</p>
-            </div>
-          )}
-
+          {/* 生成按钮 + 进度 */}
           <div className="mb-6">
-            <button onClick={handleNaturalLanguageGenerate}
+            <button
+              onClick={handleNaturalLanguageGenerate}
               disabled={isNaturalGenerating || naturalLanguageInput.trim().length < 10}
-              className="bg-blue-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-blue-700 disabled:opacity-50 flex items-center justify-center space-x-2">
-              {isNaturalGenerating ? (<><RefreshCw className="w-5 h-5 animate-spin" /><span>AI生成中...</span></>) :
-                (<><Zap className="w-5 h-5" /><span>智能生成报告</span></>)}
+              className="bg-blue-600 text-white py-3 px-6 rounded-lg font-semibold hover:bg-blue-700
+                        disabled:opacity-50 flex items-center justify-center space-x-2 w-full md:w-auto"
+            >
+              {isNaturalGenerating ? (
+                <>
+                  <RefreshCw className="w-5 h-5 animate-spin" />
+                  <span>AI 生成中...</span>
+                </>
+              ) : (
+                <>
+                  <Zap className="w-5 h-5" />
+                  <span>智能生成报告</span>
+                </>
+              )}
             </button>
+
+            {isNaturalGenerating && (
+              <div className="mt-3 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                <div className="flex items-center mb-2">
+                  <Bot className="w-5 h-5 text-blue-600 mr-2 animate-pulse" />
+                  <span className="text-sm font-medium text-blue-700">AI 正在生成报告...</span>
+                </div>
+                <div className="w-full bg-blue-200 rounded-full h-2">
+                  <div
+                    className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                    style={{ width: `${generationProgress}%` }}
+                  />
+                </div>
+                <p className="text-xs text-blue-600 mt-1">正在分析需求并生成报告结构...</p>
+              </div>
+            )}
           </div>
 
+          {/* 折叠的「已上传文件」面板（默认折叠） */}
+          <div className="mb-6 border border-gray-200 rounded-lg overflow-hidden">
+            <div
+              role="button"
+              tabIndex={0}
+              onClick={() => setOpenUploads((v) => !v)}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setOpenUploads(v => !v); }}
+              className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 cursor-pointer"
+            >
+              <div className="flex items-center gap-2">
+                <ChevronRight
+                  className={`w-4 h-4 text-gray-600 transition-transform ${openUploads ? 'rotate-90' : ''}`}
+                />
+                <span className="text-sm font-medium text-gray-700">附加文件（勾选后参与生成）</span>
+                {selectedUploadIds.length > 0 && (
+                  <span className="ml-2 text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">
+                    已选 {selectedUploadIds.length}
+                  </span>
+                )}
+                <span className="ml-2 text-xs text-gray-500">
+                  {uploads.length ? `${uploads.length} 个文件` : '暂无文件'}
+                </span>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  ref={uploadInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={onUploadsChosen}
+                />
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); pickUpload(); }}
+                  disabled={uploading || isNaturalGenerating}
+                  className="px-3 py-1.5 text-xs border rounded-md hover:bg-white disabled:opacity-50"
+                >
+                  {uploading ? '上传中…' : '上传文件'}
+                </button>
+              </div>
+            </div>
+
+            {openUploads && (
+              <div className="p-3">
+                {uploads.length === 0 ? (
+                  <div className="text-sm text-gray-500">
+                    暂无文件，点击右上角「上传文件」添加 PDF/Word/Excel/CSV/HTML/文本。
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {uploads.map((u) => (
+                      <div
+                        key={u.id}
+                        className="flex items-center justify-between p-2 bg-white rounded-lg border"
+                      >
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={selectedUploadIds.includes(u.id)}
+                            onChange={(e) => {
+                              setSelectedUploadIds(prev =>
+                                e.target.checked ? [...prev, u.id] : prev.filter(id => id !== u.id)
+                              );
+                            }}
+                          />
+                          <div className="flex items-center gap-2">
+                            <File className="h-4 w-4 text-gray-500" />
+                            <div>
+                              <div className="text-sm font-medium">{u.file_name}</div>
+                              <div className="text-xs text-gray-500">{(u.size_bytes / 1024).toFixed(1)} KB</div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          {/* 先去掉签名阶段：没有链接就不渲染按钮，仅列文件名 */}
+                            {u.signedUrl ? (
+                              <a
+                                href={u.signedUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-blue-600 hover:underline text-sm"
+                              >
+                                预览/下载
+                              </a>
+                            ) : null}
+
+                          <button
+                            onClick={() => removeUploadFile(u.id, u.file_name)}
+                            className="text-red-600 hover:text-red-700"
+                            title="删除"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {selectedUploadIds.length > 0 && (
+                  <div className="mt-2 text-xs text-gray-600">
+                    已选择 <span className="font-medium">{selectedUploadIds.length}</span> 个文件
+                    <button
+                      onClick={() => setSelectedUploadIds([])}
+                      className="ml-3 text-blue-600 hover:underline"
+                    >
+                      清空选择
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+
+          {/* 快捷建议 */}
           <div className="flex-1">
             <h3 className="text-sm font-medium text-gray-700 mb-3 flex items-center space-x-2">
-              <Lightbulb className="w-4 h-4 text-yellow-500" /><span>快捷建议</span>
+              <Lightbulb className="w-4 h-4 text-yellow-500" />
+              <span>快捷建议</span>
             </h3>
             <div className="space-y-2">
               {[
-                '请生成2025年上半年综合经营分析报告，重点关注ROE与现金流',
-                '分析港口业务板块2024Q4同比与环比，输出关键驱动与建议',
-                '生成招商地产2025Q2业绩速览（含简要图表与要点）'
-              ].map((s, i)=>(
-                <button key={i} onClick={()=>setNaturalLanguageInput(s)} disabled={isNaturalGenerating}
-                        className="w-full text-left p-3 border border-gray-200 rounded-lg hover:border-blue-300 hover:bg-blue-50 transition-all text-sm text-gray-700 disabled:opacity-50">
+                '请按照附件模板生成 XX集团公司 2025年 Q1的报告',
+                '请生成 2025 年上半年 XX港口公司 综合经营分析报告，重点关注 盈利能力和营运能力',
+                '分析港口业务板块 2024Q4 同比与环比，输出关键驱动与建议',
+              ].map((s, i) => (
+                <button
+                  key={i}
+                  onClick={() => setNaturalLanguageInput(s)}
+                  disabled={isNaturalGenerating}
+                  className="w-full text-left p-3 border border-gray-200 rounded-lg hover:border-blue-300
+                            hover:bg-blue-50 transition-all text-sm text-gray-700 disabled:opacity-50"
+                >
                   {s}
                 </button>
               ))}
@@ -969,12 +1268,17 @@ const getNextCopyName = (base: string, existing: string[]) => {
         <div className="w-1/3 bg-gray-50 border-l border-gray-200 p-6 overflow-y-auto">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">使用指南</h3>
           <div className="space-y-4">
-            <div><h4 className="font-medium text-gray-800 mb-2">1. 描述报告需求</h4><p className="text-sm text-gray-600">详细描述您需要的报告类型、时间范围、关注重点等信息。</p></div>
+            <div>
+              <h4 className="font-medium text-gray-800 mb-2">1. 描述报告需求</h4>
+              <p className="text-sm text-gray-600">
+                详细描述您需要的报告类型、时间范围、关注重点等信息。
+              </p>
+            </div>
             <div>
               <h4 className="font-medium text-gray-800 mb-2">2. 包含关键信息</h4>
               <ul className="text-sm text-gray-600 space-y-1">
                 <li>• 报告类型（季度、年度、风险评估等）</li>
-                <li>• 时间范围（Q3、2024年等）</li>
+                <li>• 时间范围（Q3、2024 年等）</li>
                 <li>• 分析重点（收入、利润、现金流等）</li>
                 <li>• 对比要求（同比、环比等）</li>
                 <li>• 输出要求（图表、预测等）</li>
@@ -985,6 +1289,7 @@ const getNextCopyName = (base: string, existing: string[]) => {
       </div>
     );
   }
+
 
   function renderSetupView() { return <div className="h-full">{activeTab==='template'?renderTemplateTab():renderNaturalLanguageTab()}</div>; }
 
@@ -1111,7 +1416,7 @@ const getNextCopyName = (base: string, existing: string[]) => {
       </div>
 
       <div className="h-[calc(100vh-5rem)]">
-      {activeTab === 'template' ? renderCurrentView() : renderNaturalLanguageTab()}
+      {renderCurrentView()}
       </div>
 
       {/* ========= 查看模板 弹窗 ========= */}
@@ -1317,7 +1622,7 @@ const getNextCopyName = (base: string, existing: string[]) => {
                   value={beautifyOptions.instructions}
                   onChange={e=>setBeautifyOptions({...beautifyOptions, instructions:e.target.value})}
                   rows={4}
-                  placeholder="例：标题层级统一；正文字号16px、行距1.8；图表统一蓝绿配色；表格加条纹底色；保留原始数据不改动。"
+                  placeholder="例：标题层级统一；正文字号13px、行距1.8；图表统一蓝绿配色；表格加条纹底色；保留原始数据不改动。"
                   className="w-full border border-gray-300 rounded-lg px-3 py-2 resize-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 placeholder-gray-400"
                 />
               </div>
@@ -1337,7 +1642,7 @@ const getNextCopyName = (base: string, existing: string[]) => {
                     type="number"
                     className="w-full border border-gray-300 rounded-lg px-3 py-2"
                     value={beautifyOptions.base_font_size}
-                    onChange={e=>setBeautifyOptions({...beautifyOptions, base_font_size:Number(e.target.value) || 16})}
+                    onChange={e=>setBeautifyOptions({...beautifyOptions, base_font_size:Number(e.target.value) || 13})}
                   />
                 </div>
                 <div>
@@ -1413,13 +1718,19 @@ const getNextCopyName = (base: string, existing: string[]) => {
                       下载 Word
                     </a>
                   )}
-
                   {beautifyResult.pdf_url && (
                     <a className="px-3 py-2 bg-red-600 text-white rounded-lg text-sm"
                       href={beautifyResult.pdf_download_url || `${beautifyResult.pdf_url}?download=beautified.pdf`}>
                       下载 PDF
                     </a>
                   )}
+                  {beautifyResult.pptx_url && (   /* ✅ 新增 */
+                    <a className="px-3 py-2 bg-orange-600 text-white rounded-lg text-sm"
+                      href={beautifyResult.pptx_download_url || `${beautifyResult.pptx_url}?download=beautified.pptx`}>
+                      下载 PPT
+                    </a>
+                  )}
+
 
                   {!beautifyResult.html_url && beautifyResult.html && (
                     <button

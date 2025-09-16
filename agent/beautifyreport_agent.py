@@ -31,6 +31,9 @@ import html as html_lib
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import Table, TableStyle
+from reportlab.lib import colors
+
 # 可选 LLM
 from openai import OpenAI
 
@@ -60,8 +63,167 @@ from reportlab.lib.enums import TA_LEFT
 from reportlab.lib import colors
 
 import html as html_lib  # 如果上面已有就不要重复导入
+# 在现有import之后添加
 import re
-from typing import Optional
+from typing import Optional, List, Dict, Any, Tuple
+
+from pptx import Presentation
+from pptx.util import Inches as PptxInches, Pt as PPt
+from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
+# ========= DTO =========
+class BeautifyStyle(BaseModel):
+    # 原有字段保持不变
+    font_family: Optional[str] = 'Inter, "Microsoft YaHei", system-ui, -apple-system, Segoe UI, sans-serif'
+    heading_font_family: Optional[str] = None
+    code_font_family: Optional[str] = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace'
+    base_font_size: Optional[int] = 16
+    line_height: Optional[float] = 1.75
+    paragraph_spacing_px: Optional[int] = 8
+    content_width_px: Optional[int] = 920
+    theme: Optional[str] = "light"
+    color: Optional[str] = "#111827"
+    accent_color: Optional[str] = "#2563eb"
+    palette: Optional[List[str]] = None
+    
+    # 新增用户可配置字段
+    template_style: Optional[str] = "modern"          # modern | classic | minimal | business
+    show_kpi_cards: Optional[bool] = True             # 是否显示KPI卡片
+    show_toc_sidebar: Optional[bool] = True           # 是否显示侧边栏目录
+    card_shadow_intensity: Optional[str] = "medium"   # low | medium | high
+    border_radius: Optional[int] = 12                 # 圆角大小
+    page_background: Optional[str] = "gradient"       # solid | gradient | none
+    heading_style: Optional[str] = "modern"           # modern | classic | minimal
+    table_style: Optional[str] = "bordered"           # bordered | striped | minimal
+    code_theme: Optional[str] = "github"              # github | monokai | tomorrow
+    chart_height: Optional[int] = 360                 # 图表高度
+    enable_animations: Optional[bool] = True          # 是否启用动画效果
+    custom_css: Optional[str] = None                  # 用户自定义CSS
+
+
+def extract_kpis_from_markdown(md_text: str, show_kpi_cards: bool = True) -> List[Dict[str, str]]:
+    """从Markdown中智能提取KPI指标，支持中英文"""
+    if not show_kpi_cards:
+        return []
+    
+    kpis = []
+    
+    # 增强的KPI识别模式 - 支持中英文混合
+    patterns = [
+        # 中文营收类
+        (r'([营收入利润额度规模毛利净利]{2,})\s*[:：]\s*([\d,]+(?:\.\d+)?)\s*([万亿元%]?)', '💰'),
+        # 英文营收类
+        (r'(Revenue|Income|Profit|Sales|Earnings)\s*[:：]\s*([\d,]+(?:\.\d+)?)\s*([KMBT]?|\$|%)', '💰'),
+        
+        # 中文增长类
+        (r'([增长率变化幅度]{2,}|同比|环比|年化增长|月增长)\s*[:：]\s*([\+\-]?[\d,]+(?:\.\d+)?)\s*([%个点]?)', '📈'),
+        # 英文增长类
+        (r'(Growth|Increase|Change|YoY|MoM|QoQ)\s*[:：]\s*([\+\-]?[\d,]+(?:\.\d+)?)\s*([%]?)', '📈'),
+        
+        # 中文占比类
+        (r'([市场份额占比比例率转化率]{2,})\s*[:：]\s*([\d,]+(?:\.\d+)?)\s*([%]?)', '📊'),
+        # 英文占比类
+        (r'(Market Share|Ratio|Rate|Percentage|Share)\s*[:：]\s*([\d,]+(?:\.\d+)?)\s*([%]?)', '📊'),
+        
+        # 中文数量类
+        (r'([用户数量规模总数客户数订单量]{2,})\s*[:：]\s*([\d,]+(?:\.\d+)?)\s*([万个千百]?)', '👥'),
+        # 英文数量类
+        (r'(Users|Customers|Orders|Count|Volume|Total)\s*[:：]\s*([\d,]+(?:\.\d+)?)\s*([KMBT]?)', '👥'),
+        
+        # 财务指标
+        (r'(ROI|ARPU|客单价|转化率|满意度|CTR|CAC|LTV)\s*[:：]\s*([\d,]+(?:\.\d+)?)\s*([%元$]?)', '🎯'),
+        (r'(Conversion|Satisfaction|ROAS|CPC|CPM)\s*[:：]\s*([\d,]+(?:\.\d+)?)\s*([%$]?)', '🎯'),
+        
+        # 时间相关指标
+        (r'([响应时间处理时间平均时间]{3,})\s*[:：]\s*([\d,]+(?:\.\d+)?)\s*([秒分钟小时天]?)', '⏱️'),
+        (r'(Response Time|Processing Time|Average Time|Duration)\s*[:：]\s*([\d,]+(?:\.\d+)?)\s*(s|min|h|ms)?', '⏱️'),
+    ]
+    
+    for pattern, icon in patterns:
+        matches = re.findall(pattern, md_text, re.IGNORECASE)
+        for label, value, unit in matches:
+            # 避免重复和无效数据
+            if not any(kpi['label'].lower() == label.lower() for kpi in kpis) and value.strip():
+                kpis.append({
+                    'label': label,
+                    'value': f"{value}{unit}",
+                    'icon': icon
+                })
+    
+    return kpis[:12]  # 增加到最多显示12个
+# --- helpers for table normalization ---
+def _normalize_unit(s: str) -> str:
+    """将 pct / PCT / Pct 统一成 %，其余不动"""
+    return re.sub(r'(?i)pct', '%', s or '')
+
+UNWRAP_MD_TABLE_RE = re.compile(
+    r"```(?:markdown|md)\s*\n(\s*\|.+?\|\s*(?:\n\s*\|.+?\|\s*)+)```",
+    re.IGNORECASE | re.DOTALL
+)
+def unwrap_markdown_table_fences(md_text: str) -> str:
+    """把 ```markdown 包裹的表格还原成纯表格 Markdown"""
+    return UNWRAP_MD_TABLE_RE.sub(lambda m: m.group(1).strip(), md_text or "")
+
+def _delta_polarity(s: str) -> int:
+    """判断环比/同比的涨跌：>0 返回 1；<0 返回 -1；否则 0"""
+    if not s:
+        return 0
+    t = s.strip().replace(',', '')
+    m = re.search(r'([+\-]?)\s*(\d+(?:\.\d+)?)', t)
+    if not m:
+        return 0
+    sign, num = m.group(1), float(m.group(2))
+    if sign == '-': return -1
+    if sign == '+': return 1
+    return 1 if num > 0 else (-1 if num < 0 else 0)
+
+def inject_kpi_grid(md_text: str, style: Optional[BeautifyStyle] = None) -> str:
+    """在Markdown开头注入KPI网格，支持样式配置"""
+    if not style or not style.show_kpi_cards:
+        return md_text
+        
+    kpis = extract_kpis_from_markdown(md_text, style.show_kpi_cards)
+    
+    if not kpis:
+        return md_text
+    
+    # 根据模板样式生成不同的KPI HTML
+    template = style.template_style or "modern"
+    
+    kpi_items = []
+    for kpi in kpis:
+        if template == "business":
+            kpi_items.append(f'''
+            <div class="kpi kpi-business">
+                <div class="kpi-header">{kpi['icon']}</div>
+                <div class="kpi-label">{kpi['label']}</div>
+                <div class="kpi-value">{kpi['value']}</div>
+            </div>''')
+        elif template == "minimal":
+            kpi_items.append(f'''
+            <div class="kpi kpi-minimal">
+                <span class="kpi-label">{kpi['label']}</span>
+                <span class="kpi-value">{kpi['value']}</span>
+            </div>''')
+        else:  # modern (default)
+            kpi_items.append(f'''
+            <div class="kpi kpi-modern">
+                <div class="kpi-label">{kpi['icon']} {kpi['label']}</div>
+                <div class="kpi-value">{kpi['value']}</div>
+            </div>''')
+    
+    kpi_html = f'<div class="kpi-grid kpi-{template}">{"".join(kpi_items)}</div>\n\n'
+    
+    # 在第一个标题前插入KPI
+    lines = md_text.split('\n')
+    insert_pos = 0
+    for i, line in enumerate(lines):
+        if line.strip().startswith('#'):
+            insert_pos = i
+            break
+    
+    lines.insert(insert_pos, kpi_html)
+    return '\n'.join(lines)
 
 _inline_pat = re.compile(r'(\*\*.+?\*\*|\*.+?\*|`.+?`)', re.U)
 
@@ -183,20 +345,23 @@ def _resolve_pdf_fonts(style) -> tuple[str, str]:
 
 def _apply_docx_font(doc, family: Optional[str]):
     """让 Word 使用用户字体（若未提供则不强制）"""
-    if not family:
+    fams = _parse_font_list(family)
+    name = fams[0] if fams else None
+    if not name:
         return
     try:
         from docx.oxml.ns import qn
         style = doc.styles["Normal"]
-        style.font.name = family
+        style.font.name = name
         r = style._element.get_or_add_rPr()
         rFonts = r.rFonts
-        rFonts.set(qn('w:ascii'), family)
-        rFonts.set(qn('w:eastAsia'), family)
-        rFonts.set(qn('w:hAnsi'), family)
-        rFonts.set(qn('w:cs'), family)
+        rFonts.set(qn('w:ascii'), name)
+        rFonts.set(qn('w:eastAsia'), name)
+        rFonts.set(qn('w:hAnsi'), name)
+        rFonts.set(qn('w:cs'), name)
     except Exception:
         pass
+
 
 
 # ✅ Matplotlib 中文与负号
@@ -250,18 +415,6 @@ app.add_middleware(
 )
 
 # ========= DTO =========
-class BeautifyStyle(BaseModel):
-    font_family: Optional[str] = 'Inter, "Microsoft YaHei", system-ui, -apple-system, Segoe UI, sans-serif'
-    heading_font_family: Optional[str] = None
-    code_font_family: Optional[str] = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace'
-    base_font_size: Optional[int] = 16                # px
-    line_height: Optional[float] = 1.75
-    paragraph_spacing_px: Optional[int] = 8           # 段后间距
-    content_width_px: Optional[int] = 920
-    theme: Optional[str] = "light"                    # light | dark
-    color: Optional[str] = "#111827"                  # 正文颜色
-    accent_color: Optional[str] = "#2563eb"           # 强调色
-    palette: Optional[List[str]] = None               # ECharts 配色数组（如不填则使用默认）
 
 class BeautifyPayload(BaseModel):
     markdown: str
@@ -381,13 +534,15 @@ def normalize_echarts_and_extract(md_text: str, palette: Optional[List[str]], th
 
 
 def md_to_html_naive(md: str) -> str:
-    """轻量级 Markdown -> HTML（保留换行/列表/标题/加粗/斜体/表格；不依赖额外库）"""
+    """轻量 Markdown -> HTML；升级表格解析：跳过分隔行、给环比/同比上色、统一 pct→%"""
     html = md
 
     # 代码块（除 echarts 已替换外）
-    html = re.sub(r"```([a-zA-Z0-9_-]+)?\n([\s\S]*?)```",
-                  lambda m: f'<pre class="code"><code>{m.group(2).replace("<","&lt;").replace(">","&gt;")}</code></pre>',
-                  html)
+    html = re.sub(
+        r"```([a-zA-Z0-9_-]+)?\n([\s\S]*?)```",
+        lambda m: f'<pre class="code"><code>{m.group(2).replace("<","&lt;").replace(">","&gt;")}</code></pre>',
+        html
+    )
 
     # 标题
     html = re.sub(r"^### (.*)$", r'<h3>\1</h3>', html, flags=re.MULTILINE)
@@ -397,8 +552,7 @@ def md_to_html_naive(md: str) -> str:
     # 列表
     html = re.sub(r"^\- (.*)$",  r'<li>\1</li>', html, flags=re.MULTILINE)
     html = re.sub(r"^\d+\.\s+(.*)$", r'<li>\1</li>', html, flags=re.MULTILINE)
-    # 把连续的 <li> 包成 <ul>/<ol>（简单处理）
-    html = re.sub(r"((?:<li>.*?</li>\n?)+)", r"<ul>\1</ul>", html)
+    html = re.sub(r"((?:<li>.*?</li>\n?)+)", r"<ul>\1</ul>", html)  # 连续 li 包成 ul
 
     # 粗斜体
     html = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", html)
@@ -407,17 +561,69 @@ def md_to_html_naive(md: str) -> str:
     # 引用
     html = re.sub(r"^> (.*)$", r'<blockquote>\1</blockquote>', html, flags=re.MULTILINE)
 
-    # 表格（超简易）
-    def _table(m):
-        row = m.group(1)
-        cells = [f"<td>{c.strip()}</td>" for c in row.split("|")]
-        return "<tr>" + "".join(cells) + "</tr>"
-    html = re.sub(r"^\|(.*?)\|$", _table, html, flags=re.MULTILINE)
-    html = re.sub(r"((?:<tr>.*?</tr>\n?)+)", r'<table class="table">\1</table>', html)
+    # ===== 升级版表格解析 =====
+    lines = html.splitlines()
+    out: list[str] = []
+    i = 0
+    row_re = re.compile(r'^\s*\|.*\|\s*$')
+    sep_cell_re = re.compile(r'^:?-{3,}:?$')  # --- 或 :---: 之类
+
+    def esc(x: str) -> str:
+        return html_lib.escape(x, quote=False)
+
+    while i < len(lines):
+        if row_re.match(lines[i] or ''):
+            block = []
+            while i < len(lines) and row_re.match(lines[i] or ''):
+                block.append(lines[i])
+                i += 1
+
+            rows: list[list[str]] = []
+            for ln in block:
+                cells = [c.strip() for c in ln.strip()[1:-1].split('|')]
+                # 跳过全是 ---/:---: 的分隔行
+                if cells and all(sep_cell_re.match(c or '') for c in cells):
+                    continue
+                rows.append(cells)
+
+            if rows:
+                header = rows[0]
+                body   = rows[1:]
+
+                # 找出“环比/同比/QoQ/YoY/MoM”列
+                delta_idx = set()
+                for idx, h in enumerate(header):
+                    hl = h.strip().lower()
+                    if ('环比' in hl) or ('同比' in hl) or hl in ('qoq', 'yoy', 'mom'):
+                        delta_idx.add(idx)
+
+                thead = "<thead><tr>" + "".join(f"<th>{esc(h)}</th>" for h in header) + "</tr></thead>"
+                trs = []
+                for r in body:
+                    tds = []
+                    for j, cell in enumerate(r):
+                        txt = _normalize_unit(cell)
+                        if j in delta_idx:
+                            pol = _delta_polarity(txt)
+                            cls = "up" if pol > 0 else ("down" if pol < 0 else "zero")
+                            tds.append(f'<td class="delta {cls}">{esc(txt)}</td>')
+                        else:
+                            tds.append(f"<td>{esc(txt)}</td>")
+                    trs.append("<tr>" + "".join(tds) + "</tr>")
+                tbody = "<tbody>" + "".join(trs) + "</tbody>"
+                out.append(f'<table class="table">{thead}{tbody}</table>')
+            continue  # 已消费到非表格行
+
+        # 非表格行原样输出
+        out.append(lines[i])
+        i += 1
+
+    html = "\n".join(out)
 
     # 换行
     html = html.replace("\n", "<br />")
     return html
+
 def _slug_id(text: str) -> str:
     # 允许中文作为 id，去掉空白与特殊符号；前缀 sec-
     t = re.sub(r"<.*?>", "", text or "")
@@ -476,24 +682,102 @@ def apply_layout_cards_and_toc(inner_html: str, theme: str = "light") -> str:
 # ===== HTML 生成：使用外链 echarts + 内联渲染脚本；支持下载 =====
 # --- 3) 页面样式与脚手架：更强的 H1；仅摘要卡片带浅底；风险段落粗体=红字；KPI 宫格可选 ---
 def build_html_document(body_inner: str, style: BeautifyStyle) -> str:
-    font  = style.font_family or 'Inter, "Microsoft YaHei", system-ui, sans-serif'
+    # 解析样式配置 - 添加安全检查
+    font = style.font_family or 'Inter, "Microsoft YaHei", system-ui, sans-serif'
     hfont = style.heading_font_family or font
     cfont = style.code_font_family or 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Courier New", monospace'
-    fs    = style.base_font_size or 16
-    lh    = style.line_height or 1.75
-    gap   = style.paragraph_spacing_px or 8
-    width = style.content_width_px or 920
+    fs = max(12, style.base_font_size or 16)  # 确保最小字号
+    lh = max(1.2, style.line_height or 1.75)  # 确保最小行高
+    gap = max(4, style.paragraph_spacing_px or 8)  # 确保最小间距
+    width = max(600, style.content_width_px or 920)  # 确保最小宽度
     theme = (style.theme or "light").lower()
-    color = style.color or "#111827"
-    accent = style.accent_color or "#2563eb"
+    
+    # 颜色安全检查 - 确保都是有效的颜色值
+    def safe_color(color_val, fallback):
+        if not color_val or not color_val.startswith('#'):
+            return fallback
+        return color_val
+    
+    color = safe_color(style.color, "#111827")
+    accent = safe_color(style.accent_color, "#2563eb")
+    
+    # 其余代码保持不变...
 
-    bg = "#0b1220" if theme == "dark" else "#ffffff"
-    subtle_border = "rgba(255,255,255,.14)" if theme == "dark" else "rgba(0,0,0,.10)"
-    subtle_bg     = "rgba(255,255,255,.06)" if theme == "dark" else "rgba(37,99,235,.06)"  # 仅摘要卡片会用
-    muted_text    = "#9ca3af" if theme == "dark" else "#6b7280"
-    card_shadow   = "0 8px 20px rgba(0,0,0,.35)" if theme == "dark" else "0 8px 20px rgba(0,0,0,.06)"
+    
+    # 新增样式配置
+    template = style.template_style or "modern"
+    radius = style.border_radius or 12
+    shadow_intensity = style.card_shadow_intensity or "medium"
+    page_bg_type = style.page_background or "gradient"
+    
+    # 根据模板和主题计算颜色
+    if theme == "dark":
+        bg = "#0b1220"
+        if page_bg_type == "gradient":
+            page_bg = "linear-gradient(135deg, #1e1b4b 0%, #312e81 50%, #1e1b4b 100%)"
+        elif page_bg_type == "solid":
+            page_bg = "#1a1a2e"
+        else:
+            page_bg = bg
+        subtle_border = "rgba(255,255,255,.14)"
+        subtle_bg = "rgba(255,255,255,.06)"
+    else:
+        bg = "#ffffff"
+        if page_bg_type == "gradient":
+            if template == "business":
+                page_bg = "linear-gradient(135deg, #667eea 0%, #764ba2 50%, #667eea 100%)"
+            elif template == "minimal":
+                page_bg = "#f8fafc"
+            else:  # modern
+                page_bg = "linear-gradient(135deg, #667eea 0%, #764ba2 50%, #667eea 100%)"
+        elif page_bg_type == "solid":
+            page_bg = "#f1f5f9"
+        else:
+            page_bg = bg
+        subtle_border = "rgba(139, 92, 246, 0.15)"
+        subtle_bg = "rgba(37,99,235,.08)"
+    
+    # 阴影强度
+    shadow_map = {
+        "low": "0 4px 12px rgba(37, 99, 235, 0.08)" if theme == "light" else "0 4px 12px rgba(0,0,0,.2)",
+        "medium": "0 12px 32px rgba(37, 99, 235, 0.15)" if theme == "light" else "0 8px 20px rgba(0,0,0,.35)",
+        "high": "0 20px 40px rgba(37, 99, 235, 0.2)" if theme == "light" else "0 12px 32px rgba(0,0,0,.5)"
+    }
+    card_shadow = shadow_map.get(shadow_intensity, shadow_map["medium"])
+    
+    muted_text = "#9ca3af" if theme == "dark" else "#6b7280"
+
+    # Web字体导入
+    web_fonts = []
+    font_families = _parse_font_list(style.font_family)
+    for font_name in font_families:
+        if 'inter' in font_name.lower():
+            web_fonts.append('@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap");')
+        elif 'noto' in font_name.lower():
+            web_fonts.append('@import url("https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;600;800&display=swap");')
+    
+    web_font_css = '\n'.join(web_fonts)
+    
+    # 动画CSS
+    animations_css = ""
+    if style.enable_animations:
+        animations_css = """
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes slideInLeft {
+            from { opacity: 0; transform: translateX(-20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        .kpi, .card { animation: fadeInUp 0.6s ease-out; }
+        .sidebar { animation: slideInLeft 0.8s ease-out; }
+        """
 
     css = f"""
+    {web_font_css}
+    {animations_css}
+    
     :root {{
       --font: {font};
       --hfont: {hfont};
@@ -504,95 +788,381 @@ def build_html_document(body_inner: str, style: BeautifyStyle) -> str:
       --w: {width}px;
       --fg: {color};
       --bg: {bg};
+      --page-bg: {page_bg};
       --accent: {accent};
+      --accent2: #8b5cf6;
       --muted: {muted_text};
       --border: {subtle_border};
       --subtle-blue: {subtle_bg};
       --shadow: {card_shadow};
+      --radius: {radius}px;
     }}
+    
     * {{ box-sizing: border-box; }}
     html,body {{ height: 100%; }}
     body {{
-      margin: 0; padding: 24px; color: var(--fg); background: var(--bg);
+      margin: 0; padding: 24px; color: var(--fg); 
+      background: var(--page-bg);
+      background-attachment: fixed;
       font-family: var(--font); font-size: var(--fs); line-height: var(--lh);
       -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
     }}
-    .container {{ max-width: var(--w); margin: 0 auto; }}
+    
+    .container {{ 
+      max-width: var(--w); margin: 0 auto; 
+      background: var(--bg);
+      backdrop-filter: blur(10px);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 32px;
+      border: 1px solid var(--border);
+    }}
 
-    /* —— 标题 —— */
-    h1,h2,h3,h4,h5,h6 {{ font-family: var(--hfont); margin: 1.2em 0 .6em; line-height: 1.25; }}
-    h1.hero {{
+    /* ===== 模板样式 ===== */
+    
+    /* Modern模板 */
+    .template-modern h1.hero {{
       font-size: calc(var(--fs) * 2.4);
       font-weight: 800;
-      letter-spacing: .3px;
-      margin-top: 6px;
+      /* 默认字体颜色作为fallback */
+      color: var(--accent, #2563eb);
+      background: linear-gradient(135deg, var(--accent, #2563eb), var(--accent2, #8b5cf6));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
       position: relative;
-      padding-bottom: .25em;
     }}
-    h1.hero::after {{
-      content: ""; position: absolute; left: 0; bottom: 0; height: 4px; width: 82px;
-      background: linear-gradient(90deg, var(--accent), transparent);
+
+    /* 不支持background-clip的浏览器fallback */
+    @supports not (-webkit-background-clip: text) {{
+      .template-modern h1.hero {{
+        color: var(--accent, #2563eb) !important;
+        background: none !important;
+        -webkit-text-fill-color: initial !important;
+      }}
+    }}
+
+    /* Firefox兼容 */
+    @-moz-document url-prefix() {{
+      .template-modern h1.hero {{
+        color: var(--accent, #2563eb) !important;
+        background: none !important;
+        -webkit-text-fill-color: initial !important;
+      }}
+    }}
+
+    .template-modern h1.hero::after {{
+      content: ""; position: absolute; left: 0; bottom: 0; height: 4px; width: 120px;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
       border-radius: 8px;
     }}
-    h2 {{ font-size: calc(var(--fs) * 1.6); border-left: 4px solid var(--accent); padding-left: .55em; }}
-    h3 {{ font-size: calc(var(--fs) * 1.3); }}
+    
+    /* Business模板 */
+    .template-business {{
+      --accent: #1e40af;
+      --accent2: #3b82f6;
+    }}
+    .template-business h1.hero {{
+      font-size: calc(var(--fs) * 2.2);
+      font-weight: 700;
+      color: var(--accent);
+      border-bottom: 3px solid var(--accent);
+      padding-bottom: 16px;
+    }}
+    .template-business .kpi-business {{
+      background: linear-gradient(135deg, #1e40af, #3b82f6);
+      border-radius: 8px;
+    }}
+    
+    /* Minimal模板 */
+    .template-minimal {{
+      --radius: 4px;
+    }}
+    .template-minimal h1.hero {{
+      font-size: calc(var(--fs) * 2.0);
+      font-weight: 600;
+      color: var(--accent);
+      border-left: 4px solid var(--accent);
+      padding-left: 20px;
+    }}
+    .template-minimal .kpi-minimal {{
+      background: transparent;
+      border: 2px solid var(--border);
+      border-radius: 4px;
+      padding: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }}
+
+    /* ===== 通用元素样式 ===== */
+    
+    h1,h2,h3,h4,h5,h6 {{ 
+      font-family: var(--hfont); 
+      margin: 1.2em 0 .6em; 
+      line-height: 1.25; 
+    }}
+    
+    h2 {{ 
+      font-size: calc(var(--fs) * 1.6); 
+      border-left: 4px solid var(--accent); 
+      padding-left: .55em;
+      position: relative;
+    }}
+    h2::before {{
+      content: "";
+      position: absolute;
+      left: -4px;
+      top: 0;
+      bottom: 0;
+      width: 4px;
+      background: linear-gradient(180deg, var(--accent), var(--accent2));
+    }}
+    h3 {{ font-size: calc(var(--fs) * 1.3); color: var(--accent); }}
 
     p, ul, ol, blockquote, table, pre {{ margin: var(--gap) 0; }}
     ul, ol {{ padding-left: 1.2em; }}
-    strong {{ font-weight: 600; }}
+    strong {{ font-weight: 600; color: var(--accent); }}
     em {{ font-style: italic; }}
     a {{ color: var(--accent); text-decoration: none; }}
     a:hover {{ text-decoration: underline; }}
 
-    /* —— 引用/代码/表格 —— */
-    blockquote {{ padding: .7em 1em; background: rgba(0,0,0,.04); border-left: 3px solid var(--accent); border-radius: 8px; }}
-    pre, code {{ font-family: var(--cfont); }}
-    pre.code {{ background: rgba(0,0,0,.05); padding: 12px; border-radius: 10px; overflow:auto; }}
-    table.table {{ width: 100%; border-collapse: collapse; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }}
-    table.table th, table.table td {{ border-bottom: 1px solid var(--border); padding: 10px 12px; }}
-    table.table thead th {{ background: rgba(0,0,0,.03); text-align: left; }}
-
-    /* —— 卡片（仅用于“摘要/总起”） —— */
-    .card {{
-      padding: 16px 18px; border: 1px solid var(--border); border-radius: 12px;
-      box-shadow: var(--shadow); margin: 12px 0;
-      background: transparent;
+    /* ===== KPI样式增强 ===== */
+    
+    .kpi-grid {{ 
+        display: grid; 
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); 
+        gap: 16px; 
+        margin: 20px 0; 
     }}
-    .card.tone-blue {{ background: var(--subtle-blue); border-color: rgba(37,99,235,.28); }}
+    
+    .kpi {{ 
+        padding: 20px; 
+        border: 1px solid var(--border); 
+        border-radius: var(--radius); 
+        position: relative;
+        overflow: hidden;
+        transform: translateY(0);
+        transition: all 0.3s ease;
+    }}
+    
+    .kpi-modern {{
+        background: linear-gradient(135deg, var(--accent), var(--accent2));
+        color: white;
+    }}
+    .kpi-modern:hover {{
+        transform: translateY(-4px);
+        box-shadow: 0 12px 24px rgba(37, 99, 235, 0.3);
+    }}
+    .kpi-modern .kpi-label {{ 
+        font-size: 13px; 
+        color: rgba(255,255,255,0.9); 
+        display: flex; 
+        align-items: center; 
+        gap: 8px; 
+        margin-bottom: 8px;
+    }}
+    .kpi-modern .kpi-value {{ 
+        font-size: 24px; 
+        font-weight: 700; 
+        color: white;
+        text-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }}
+    
+    .kpi-business {{
+        background: linear-gradient(135deg, #1e40af, #3b82f6);
+        color: white;
+    }}
+    .kpi-business .kpi-header {{
+        font-size: 24px;
+        margin-bottom: 8px;
+    }}
+    .kpi-business .kpi-label {{
+        font-size: 12px;
+        opacity: 0.9;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }}
+    .kpi-business .kpi-value {{
+        font-size: 28px;
+        font-weight: 800;
+        margin-top: 4px;
+    }}
+    
+    .kpi-minimal {{
+        background: transparent;
+        border: 2px solid var(--border);
+        color: var(--fg);
+    }}
+    .kpi-minimal .kpi-label {{
+        font-size: 14px;
+        color: var(--muted);
+    }}
+    .kpi-minimal .kpi-value {{
+        font-size: 20px;
+        font-weight: 700;
+        color: var(--accent);
+    }}
 
-    /* 风险章节：段内粗体高亮为红色 */
+    /* ===== 卡片和布局 ===== */
+    
+    .card {{
+        padding: 20px 24px; 
+        border: 1px solid var(--border); 
+        border-radius: var(--radius);
+        box-shadow: var(--shadow); 
+        margin: 16px 0;
+        background: transparent;
+        position: relative;
+        overflow: hidden;
+    }}
+    .card::before {{
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 4px;
+        background: linear-gradient(90deg, var(--accent), var(--accent2));
+    }}
+    .card.tone-blue {{ 
+        background: var(--subtle-blue); 
+        border-color: var(--accent);
+    }}
+
     .risk strong {{ color: #ef4444; }}
 
-    /* KPI 宫格（可选使用） */
-    .kpi-grid {{ display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; margin: 12px 0; }}
-    .kpi {{ padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: transparent; }}
-    .kpi .label {{ font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }}
-    .kpi .value {{ font-size: 20px; font-weight: 700; margin-top: 2px; color: var(--fg); }}
-    .kpi .icon {{ font-size: 14px; }}
-    @media (max-width: 1024px) {{ .kpi-grid {{ grid-template-columns: repeat(2, minmax(0,1fr)); }} }}
+    /* ===== 表格样式 ===== */
+    
+    table.table {{ 
+        width: 100%; 
+        border-collapse: collapse; 
+        border-radius: var(--radius); 
+        overflow: hidden;
+        box-shadow: var(--shadow);
+        margin: 16px 0;
+    }}
+    table.table th, table.table td {{ 
+        border-bottom: 1px solid var(--border); 
+        padding: 12px 16px; 
+        text-align: left;
+    }}
+    table.table thead th {{ 
+        background: linear-gradient(135deg, var(--accent), var(--accent2)); 
+        color: white;
+        font-weight: 600;
+    }}
+    table.table tbody tr:hover {{
+        background-color: var(--subtle-blue);
+    }}
+    table.table td.delta.up {{ color: #10b981; font-weight: 600; }}
+    table.table td.delta.down {{ color: #ef4444; font-weight: 600; }}
+    table.table td.delta.zero {{ color: var(--muted); }}
 
-    /* 两栏布局 + 侧栏 */
-    .layout {{ display: grid; grid-template-columns: 260px 1fr; gap: 24px; }}
+
+
+    /* ===== 代码块样式 ===== */
+    
+    pre, code {{ font-family: var(--cfont); }}
+    pre.code {{ 
+        background: linear-gradient(135deg, rgba(0,0,0,.05), rgba(0,0,0,.02)); 
+        padding: 16px; 
+        border-radius: var(--radius); 
+        overflow: auto;
+        border: 1px solid var(--border);
+        position: relative;
+    }}
+    pre.code::before {{
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 4px;
+        height: 100%;
+        background: var(--accent);
+    }}
+
+    /* ===== 侧边栏 ===== */
+    
+    .layout {{ display: grid; grid-template-columns: 280px 1fr; gap: 32px; }}
     .sidebar {{
-      position: sticky; top: 16px; align-self: start; color: var(--muted);
-      border-left: 3px solid var(--accent); padding-left: 12px; max-height: calc(100vh - 80px); overflow:auto;
+        position: sticky; top: 24px; align-self: start; 
+        background: var(--subtle-blue);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 20px;
+        max-height: calc(100vh - 100px); 
+        overflow: auto;
     }}
-    .sidebar nav a {{ display:block; padding:6px 0; color:var(--muted); text-decoration:none; }}
-    .sidebar nav a:hover {{ color: var(--fg); }}
-    .sidebar .title {{ font-weight:600; color:var(--fg); margin-bottom:6px; }}
-    @media (max-width: 1100px) {{ .layout {{ grid-template-columns: 1fr; }} .sidebar {{ position: relative; max-height:none; }} }}
+    .sidebar nav a {{ 
+        display: block; 
+        padding: 10px 12px; 
+        color: var(--muted); 
+        text-decoration: none;
+        border-radius: calc(var(--radius) / 2);
+        margin: 2px 0;
+        transition: all 0.2s ease;
+    }}
+    .sidebar nav a:hover {{ 
+        color: var(--accent); 
+        background: rgba(37, 99, 235, 0.1);
+    }}
+    .sidebar .title {{ 
+        font-weight: 600; 
+        color: var(--accent); 
+        margin-bottom: 12px; 
+        font-size: 16px;
+    }}
 
-    /* 图表容器 */
+    /* ===== 图表容器 ===== */
+    
     .echarts {{
-      width: 100%; height: 360px; border: 1px solid var(--border); border-radius: 10px; margin: 12px 0;
-      background: transparent;
+        width: 100%; 
+        height: {style.chart_height or 360}px; 
+        border: 1px solid var(--border); 
+        border-radius: var(--radius); 
+        margin: 16px 0;
+        background: var(--bg);
+        box-shadow: var(--shadow);
     }}
 
-    .footer {{ color: var(--muted); font-size: 12px; margin-top: 32px; text-align: right; }}
+    /* ===== 响应式设计 ===== */
+    
+    @media (max-width: 1100px) {{ 
+        .layout {{ grid-template-columns: 1fr; }} 
+        .sidebar {{ position: relative; max-height: none; }} 
+        .kpi-grid {{ grid-template-columns: repeat(2, 1fr); }}
+    }}
+    
+    @media (max-width: 768px) {{
+        .container {{ padding: 20px; }}
+        .kpi-grid {{ grid-template-columns: 1fr; }}
+        h1.hero {{ font-size: calc(var(--fs) * 1.8) !important; }}
+    }}
+
+    .footer {{ 
+        color: var(--muted); 
+        font-size: 12px; 
+        margin-top: 40px; 
+        text-align: center;
+        padding-top: 20px;
+        border-top: 1px solid var(--border);
+    }}
+    
+    /* 用户自定义CSS */
+    {style.custom_css or ''}
     """
 
+    # 应用模板类到body
+    template_class = f"template-{template}"
+    
+    # 其余代码保持不变...
     # 强化 H1：把第一处 <h1> 加 hero class
     body_inner = re.sub(r"<h1>(.*?)</h1>", r'<h1 class="hero">\1</h1>', body_inner, count=1)
+    
+    # 处理侧边栏显示
+    if not style.show_toc_sidebar:
+        body_inner = re.sub(r'<div class=[\'"]layout[\'"]><aside class=[\'"]sidebar[\'"]>.*?</aside><article>(.*?)</article></div>', r'\1', body_inner, flags=re.S)
 
     echarts_script = '<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js" defer></script>'
     js = """
@@ -605,7 +1175,6 @@ def build_html_document(body_inner: str, style: BeautifyStyle) -> str:
           var opt = JSON.parse(raw);
           var chart = echarts.init(div);
           chart.setOption(opt || {});
-          // 初次和窗口变化都强制 resize，避免容器首次计算不完整
           setTimeout(function(){ chart.resize(); }, 30);
           window.addEventListener('resize', function(){ chart && chart.resize(); });
         }catch(e){ console.warn('echarts parse failed', e); }
@@ -614,19 +1183,18 @@ def build_html_document(body_inner: str, style: BeautifyStyle) -> str:
     """
 
     html = f"""<!DOCTYPE html>
-<html lang="zh">
+<html lang="zh" class="{template_class}">
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<meta http-equiv="Content-Security-Policy" content="default-src 'self' https: data: 'unsafe-inline' 'unsafe-eval'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' https: data: 'unsafe-inline' 'unsafe-eval';">
 <title>Beautified Report</title>
 <style>{css}</style>
 {echarts_script}
 </head>
-<body>
+<body class="{template_class}">
   <main class="container">
     {body_inner}
-    <div class="footer">由 Beautify Report Agent 生成</div>
   </main>
 <script>{js}</script>
 </body>
@@ -638,37 +1206,37 @@ def build_html_document(body_inner: str, style: BeautifyStyle) -> str:
 
 
 
+
 # --- 改后（整段替换） ---
 # ===== 上传：确保 contentType 为字符串，并返回可访问链接 =====
 def _upload(path: str, content: bytes, content_type: str) -> str:
+    # 注意：supabase-py 会把 upsert 放到请求头 x-upsert，必须是 "true"/"false" 字符串
     sb.storage.from_(REPORTS_BUCKET).upload(
-        path, content, {"contentType": str(content_type), "upsert": "true"}
+        path,
+        content,
+        {"contentType": str(content_type), "upsert": "true"}
     )
-    return sb.storage.from_(REPORTS_BUCKET).get_public_url(path)
+    resp = sb.storage.from_(REPORTS_BUCKET).get_public_url(path)
+    if isinstance(resp, dict):
+        url = resp.get("publicUrl") or (resp.get("data") or {}).get("publicUrl") \
+              or (resp.get("data") or {}).get("public_url")
+    else:
+        url = resp
+    if not isinstance(url, str) or not url:
+        raise RuntimeError("get_public_url 返回空")
+    return url
 
 def _make_download_url(path: str, public_url: str, filename: str) -> str:
-    """
-    优先用 Supabase 的 create_signed_url(download=filename) 生成带 attachment 的链接；
-    失败时回退为 public_url?download=filename
-    """
     try:
-        # supabase-py v2 返回 {'signed_url': '...'} 或 {'data': {'signed_url': '...'}}
-        resp = sb.storage.from_(REPORTS_BUCKET).create_signed_url(
-            path, 60 * 60 * 24,  # 24h 有效
-            {"download": filename}
-        )
+        resp = sb.storage.from_(REPORTS_BUCKET).create_signed_url(path, 60*60*24, {"download": filename})
         if isinstance(resp, dict):
-            signed = resp.get("signed_url") or resp.get("signedURL")
-            if not signed and "data" in resp and isinstance(resp["data"], dict):
-                signed = resp["data"].get("signed_url") or resp["data"].get("signedURL")
-            if signed:
-                return signed
+            signed = resp.get("signed_url") or (resp.get("data") or {}).get("signed_url")
+            if signed: return signed
     except Exception as e:
         logger.warning("create_signed_url failed: %s", e)
-    # 兜底：公有桶也支持 ?download= 文件名
-    sep = "&" if "?" in public_url else "?"
+    # 兜底：把 public_url 当普通字符串处理
+    sep = "&" if isinstance(public_url, str) and "?" in public_url else "?"
     return f"{public_url}{sep}download={quote(filename)}"
-
 
 
 
@@ -684,12 +1252,49 @@ def _render_chart_png(opt: dict, style: BeautifyStyle) -> bytes:
             rcParams['font.sans-serif'] = fams + rcParams.get('font.sans-serif', [])
         rcParams['axes.unicode_minus'] = False
 
+        # --- robust x/y extraction (替换原有的 x_data/series 抽取逻辑) ---
         x_data = []
-        if isinstance(opt.get("xAxis"), dict):
-            x_data = opt["xAxis"].get("data") or []
-        series = opt.get("series") if isinstance(opt.get("series"), list) else []
-        if not x_data or not series:
+        xa = opt.get("xAxis")
+        if isinstance(xa, dict):
+            x_data = (xa.get("data") or [])[:]
+        elif isinstance(xa, list) and xa:
+            xa0 = xa[0]
+            if isinstance(xa0, dict):
+                x_data = (xa0.get("data") or [])[:]
+
+        # dataset.source 兜底
+        if not x_data and isinstance(opt.get("dataset"), dict):
+            src = opt["dataset"].get("source") or []
+            if src and isinstance(src[0], list):
+                # 若首行为表头，取第一列为类目
+                head = src[0]
+                body = src[1:] if any(isinstance(v, str) for v in head) else src
+                x_data = [row[0] for row in body if isinstance(row, list)]
+            elif src and isinstance(src[0], dict):
+                dim0 = list(src[0].keys())[0]
+                x_data = [row.get(dim0) for row in src]
+
+        series = opt.get("series")
+        series = series if isinstance(series, list) else ([series] if isinstance(series, dict) else [])
+
+        def _values(arr):
+            out = []
+            for v in (arr or []):
+                if isinstance(v, dict):
+                    out.append(v.get("value"))
+                else:
+                    out.append(v)
+            return out
+
+        # 若仍无 x_data，用第一个序列长度生成 1..N
+        if not x_data and series and isinstance(series[0], dict):
+            n = len(_values(series[0].get("data")))
+            x_data = list(range(1, n + 1))
+
+        # 无有效序列直接返回空
+        if not series:
             return b""
+
 
         palette = opt.get("color") or (style.palette or
                    ["#2563eb","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4"])
@@ -725,12 +1330,36 @@ def _render_chart_png(opt: dict, style: BeautifyStyle) -> bytes:
     except Exception:
         return b""
 
+def _iter_md_segments(md_text: str):
+    """迭代Markdown文本段落，分离文本和ECharts块"""
+    pos = 0
+    for m in ECHARTS_BLOCK_RE.finditer(md_text):
+        if m.start() > pos:
+            yield ("text", md_text[pos:m.start()])
+        raw = (m.group(1) or "").strip()
+        try:
+            opt = json.loads(raw)
+        except Exception:
+            opt = None
+        yield ("echarts", opt)
+        pos = m.end()
+    if pos < len(md_text):
+        yield ("text", md_text[pos:])
+
 
 def _px_to_pt(px: int) -> Pt:
     return Pt(max(8, (px or 16) * 0.75))
 INLINE_RE = re.compile(r'(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)')
 def _add_md_line(doc: Document, text: str, style: BeautifyStyle, bullet: bool = False):
-    p = doc.add_paragraph(style="List Bullet") if bullet else doc.add_paragraph()
+    if bullet:
+        try:
+            p = doc.add_paragraph(style="List Bullet")
+        except KeyError:
+            # 某些环境默认模板里没有 List Bullet，回退为普通段落
+            p = doc.add_paragraph()
+    else:
+        p = doc.add_paragraph()
+
     if style.paragraph_spacing_px:
         p.paragraph_format.space_after = _px_to_pt(style.paragraph_spacing_px)
 
@@ -794,101 +1423,470 @@ def export_docx_from_md(md_text: str, style: BeautifyStyle) -> bytes:
                 _add_md_line(doc, "```echarts ...```", style)
 
     buf = io.BytesIO(); doc.save(buf); return buf.getvalue()
+def export_pptx_from_md(md_text: str, style: BeautifyStyle) -> bytes:
+    """
+    Markdown → PPTX
+    规则：
+      - H1/H2 开一个新幻灯片（标题放到 slide title）
+      - H3/普通段落/列表，作为要点（bullets）放入当前页内容框
+      - Markdown 表格渲染为 PPT 表格
+      - ```echarts``` 使用已有 _render_chart_png 转成图片插入
+    """
+    prs = Presentation()
+    layout_title = prs.slide_layouts[0]     # Title
+    layout_tac   = prs.slide_layouts[1]     # Title and Content
+    layout_blank = prs.slide_layouts[6]     # Blank
 
-def export_pdf_from_md(md_text: str, style: BeautifyStyle) -> bytes:
-    """用 ReportLab Platypus：自动换行/真正粗体/标题/列表/图表 PNG 嵌入。"""
-    base_font, bold_font = _resolve_pdf_fonts(style)
-    fs = max(12, int((style.base_font_size or 16)))
-    leading = int(fs * (style.line_height or 1.6))
-    gap = (style.paragraph_spacing_px or 8)
+    def _new_slide(title: str, with_content: bool = True):
+        slide = prs.slides.add_slide(layout_tac if with_content else layout_title)
+        slide.shapes.title.text = title or ""
+        return slide
 
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buf, pagesize=A4,
-        leftMargin=20*mm, rightMargin=20*mm, topMargin=18*mm, bottomMargin=18*mm
-    )
+    # 当前页缓存
+    slide = _new_slide("报告综述", True)
+    content_box = slide.placeholders[1] if len(slide.placeholders) > 1 else None
+    tf = content_box.text_frame if content_box else None
+    if tf:
+        tf.clear()
 
-    styles = getSampleStyleSheet()
-
-    # ✅ 安全创建/更新样式（避免与内置同名样式冲突）
-    def ensure_style(name: str, **kwargs) -> ParagraphStyle:
-        if name in styles.byName:
-            s = styles[name]
-            for k, v in kwargs.items():
-                setattr(s, k, v)
-            return s
-        s = ParagraphStyle(name=name, **kwargs)
-        styles.add(s)
-        return s
-
-    ensure_style("Body",
-                 fontName=base_font, fontSize=fs, leading=leading,
-                 spaceAfter=gap, alignment=TA_LEFT)
-    ensure_style("H1",
-                 parent=styles["Heading1"], fontName=bold_font,
-                 fontSize=int(fs*1.6), leading=int(leading*1.1), spaceAfter=gap+2)
-    ensure_style("H2",
-                 parent=styles["Heading2"], fontName=bold_font,
-                 fontSize=int(fs*1.35), leading=int(leading*1.05), spaceAfter=gap)
-    ensure_style("H3",
-                 parent=styles["Heading3"], fontName=bold_font,
-                 fontSize=int(fs*1.15), leading=int(leading), spaceAfter=gap-2)
-    # ⚠️ 不要再添加 name="Bullet" 的样式；内置样式中已经有 Bullet
-
-    flow, bullets = [], []
-
-    def flush_bullets():
-        if not bullets:
-            return
-        items = [
-            ListItem(Paragraph(_md_inline_to_rl(t, bold_font), styles["Body"]))
-            for t in bullets
-        ]
-        flow.append(ListFlowable(items, bulletType='bullet', start='•', leftIndent=10*mm))
-        flow.append(Spacer(1, gap))
-        bullets.clear()
-
+    # 复用你已有的分段器（文本 / echarts）
     for kind, payload in _iter_md_segments(md_text):
         if kind == "text":
-            for raw in (payload or "").splitlines():
-                line = raw.rstrip("\r")
-                if not line.strip():
-                    flush_bullets()
-                    flow.append(Spacer(1, gap//2))
+            lines = (payload or "").splitlines()
+            i = 0
+            while i < len(lines):
+                raw = lines[i].rstrip()
+                line = raw.strip()
+                i += 1
+                if not line:
                     continue
-                if line.startswith("# "):
-                    flush_bullets()
-                    flow.append(Paragraph(_md_inline_to_rl(line[2:].strip(), bold_font), styles["H1"]))
-                elif line.startswith("## "):
-                    flush_bullets()
-                    flow.append(Paragraph(_md_inline_to_rl(line[3:].strip(), bold_font), styles["H2"]))
-                elif line.startswith("### "):
-                    flush_bullets()
-                    flow.append(Paragraph(_md_inline_to_rl(line[4:].strip(), bold_font), styles["H3"]))
-                elif line.startswith("- "):
-                    bullets.append(line[2:].strip())
-                else:
-                    flush_bullets()
-                    flow.append(Paragraph(_md_inline_to_rl(line, bold_font), styles["Body"]))
-            flush_bullets()
-        else:
+
+                # 标题：H1/H2 -> 新页
+                m = re.match(r'^(#{1,6})\s*(.+)$', line)
+                if m:
+                    level = len(m.group(1)); text = m.group(2).strip()
+                    if level <= 2:
+                        slide = _new_slide(text, True)
+                        content_box = slide.placeholders[1] if len(slide.placeholders) > 1 else None
+                        tf = content_box.text_frame if content_box else None
+                        if tf: tf.clear()
+                        continue
+                    # H3 起作为 bullet
+                    line = m.group(2).strip()
+
+                # 列表：- / 1.
+                if line.startswith("- ") or line.startswith("* "):
+                    p = tf.add_paragraph() if tf and tf.text else (tf.text_frame if tf else None)
+                    if tf and not tf.text:
+                        tf.text = line[2:].strip()
+                    else:
+                        p = tf.add_paragraph() if tf else None
+                        if p:
+                            p.text = line[2:].strip()
+                            p.level = 0
+                    continue
+                if re.match(r'^\d+\.\s+', line):
+                    txt = re.sub(r'^\d+\.\s+', '', line)
+                    p = tf.add_paragraph() if tf and tf.text else (tf.text_frame if tf else None)
+                    if tf and not tf.text:
+                        tf.text = txt
+                    else:
+                        p = tf.add_paragraph() if tf else None
+                        if p:
+                            p.text = txt
+                            p.level = 0
+                    continue
+
+                # 表格：连续管道行
+                if "|" in line and line.count("|") >= 2:
+                    # 收集表格块
+                    tbl_lines = [raw]
+                    while i < len(lines) and "|" in lines[i] and lines[i].count("|") >= 2:
+                        tbl_lines.append(lines[i].rstrip()); i += 1
+
+                    # 解析（与你 PDF 的表格解析保持一致）
+                    rows = []
+                    sep_cell_re = re.compile(r'^:?-{3,}:?$')
+                    for tline in tbl_lines:
+                        cells = [c.strip() for c in tline.strip()[1:-1].split("|")]
+                        if cells and all(sep_cell_re.match(c or '') for c in cells):
+                            continue
+                        rows.append(cells)
+                    if not rows:
+                        continue
+
+                    header, body = rows[0], rows[1:]
+                    # 新开一页放表格，避免内容拥挤
+                    slide = _new_slide("分期明细", False)
+                    slide = prs.slides.add_slide(layout_blank)
+                    left, top, width, height = PptxInches(0.5), PptxInches(1.2), PptxInches(9), PptxInches(5)
+                    table = slide.shapes.add_table(rows=len(rows), cols=len(header), left=left, top=top, width=width, height=height).table
+
+                    # 表头
+                    for c, text in enumerate(header):
+                        cell = table.cell(0, c)
+                        cell.text = text
+                        cell.text_frame.paragraphs[0].font.bold = True
+                        cell.text_frame.paragraphs[0].font.color.rgb = RGBColor(255, 255, 255)
+                        cell.fill.solid()
+                        cell.fill.fore_color.rgb = RGBColor(37, 99, 235)  # #2563eb
+
+                    # 内容
+                    for r, row in enumerate(body, start=1):
+                        for c, text in enumerate(row):
+                            cell = table.cell(r, c)
+                            cell.text = text
+
+                    continue
+
+                # 普通段落 -> bullet
+                if tf:
+                    if not tf.text:
+                        tf.text = line
+                    else:
+                        p = tf.add_paragraph()
+                        p.text = line
+                        p.level = 0
+
+        else:  # echarts -> PNG -> 新页插图
             opt = _inject_palette(payload or {}, style.palette, style.theme)
             png = _render_chart_png(opt, style)
-            if png:
-                img = RLImage(io.BytesIO(png))
-                max_w = doc.width
-                iw, ih = img.drawWidth, img.drawHeight
-                scale = min(1.0, max_w / iw)
-                img.drawWidth, img.drawHeight = iw*scale, ih*scale
-                flush_bullets()
-                flow.append(img)
-                flow.append(Spacer(1, gap))
-            else:
-                flush_bullets()
-                flow.append(Paragraph('[图表渲染失败，已保留为代码]', styles["Body"]))
+            if not png:
+                continue
+            slide = prs.slides.add_slide(layout_blank)
+            left, top = PptxInches(0.6), PptxInches(1.2)
+            pic = slide.shapes.add_picture(io.BytesIO(png), left, top, width=PptxInches(9))
 
-    doc.build(flow)
+    buf = io.BytesIO()
+    prs.save(buf)
     return buf.getvalue()
+
+def _render_chart_png(opt: dict, style: BeautifyStyle) -> bytes:
+    """
+    用 matplotlib 近似渲染 ECharts（支持 line/bar），并优先使用用户字体。
+    """
+    try:
+        # 用户字体优先
+        fams = _parse_font_list(getattr(style, "font_family", None))
+        if fams:
+            rcParams['font.sans-serif'] = fams + rcParams.get('font.sans-serif', [])
+        rcParams['axes.unicode_minus'] = False
+
+        # 提取数据
+        x_data = []
+        xa = opt.get("xAxis")
+        if isinstance(xa, dict):
+            x_data = (xa.get("data") or [])[:]
+        elif isinstance(xa, list) and xa:
+            xa0 = xa[0]
+            if isinstance(xa0, dict):
+                x_data = (xa0.get("data") or [])[:]
+
+        # dataset.source 兜底
+        if not x_data and isinstance(opt.get("dataset"), dict):
+            src = opt["dataset"].get("source") or []
+            if src and isinstance(src[0], list):
+                head = src[0]
+                body = src[1:] if any(isinstance(v, str) for v in head) else src
+                x_data = [row[0] for row in body if isinstance(row, list)]
+            elif src and isinstance(src[0], dict):
+                dim0 = list(src[0].keys())[0]
+                x_data = [row.get(dim0) for row in src]
+
+        series = opt.get("series")
+        series = series if isinstance(series, list) else ([series] if isinstance(series, dict) else [])
+
+        def _values(arr):
+            out = []
+            for v in (arr or []):
+                if isinstance(v, dict):
+                    out.append(v.get("value"))
+                else:
+                    out.append(v)
+            return out
+
+        # 若仍无 x_data，用第一个序列长度生成 1..N
+        if not x_data and series and isinstance(series[0], dict):
+            n = len(_values(series[0].get("data")))
+            x_data = list(range(1, n + 1))
+
+        # 无有效序列直接返回空
+        if not series:
+            return b""
+
+        palette = opt.get("color") or (style.palette or
+                   ["#2563eb","#10b981","#f59e0b","#ef4444","#8b5cf6","#06b6d4"])
+        fig = plt.figure(figsize=(7.2, 4.2), dpi=160)
+        ax = fig.gca()
+        x_idx = list(range(len(x_data)))
+
+        only_bar = all((s.get("type") == "bar") for s in series if isinstance(s, dict))
+        for i, s in enumerate(series):
+            y = s.get("data") or []
+            name = s.get("name") or f"系列{i+1}"
+            typ = s.get("type") or ("bar" if only_bar else "line")
+            color = palette[i % len(palette)]
+            if typ == "bar":
+                n = len(series); width = 0.8 / max(1, n)
+                ax.bar([t + (i - (n-1)/2)*width for t in x_idx], y, width=width, label=name, color=color)
+            else:
+                ax.plot(x_idx, y, marker='o', label=name, color=color)
+
+        ax.set_xticks(x_idx)
+        ax.set_xticklabels([str(x) for x in x_data], rotation=30, ha='right')
+        ax.grid(True, linestyle='--', alpha=0.25)
+        if isinstance(opt.get("title"), dict):
+            t = opt["title"].get("text") or ""
+            if t: ax.set_title(t)
+        ax.legend()
+
+        buf = io.BytesIO()
+        plt.tight_layout()
+        fig.savefig(buf, format="png")
+        plt.close(fig)
+        return buf.getvalue()
+    except Exception:
+        return b""
+
+
+def export_pdf_from_md(md_text: str, style: BeautifyStyle) -> bytes:
+    """增强版PDF导出，支持更好的Markdown解析和样式"""
+    base_font, bold_font = _resolve_pdf_fonts(style)
+    fs = max(8, (style.base_font_size or 16) * 0.75)
+    
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer, pagesize=A4,
+        leftMargin=50, rightMargin=50,
+        topMargin=60, bottomMargin=60
+    )
+    
+    # 增强样式
+    styles = getSampleStyleSheet()
+    
+    # 根据用户配置调整样式
+    normal_style = styles['Normal']
+    normal_style.fontName = base_font
+    normal_style.fontSize = fs
+    normal_style.leading = fs * (style.line_height or 1.75)
+    normal_style.spaceAfter = style.paragraph_spacing_px or 8
+    
+    # 标题样式增强
+    h1_style = styles['Heading1']
+    h1_style.fontName = bold_font
+    h1_style.fontSize = fs * 1.8
+    h1_style.textColor = colors.HexColor(style.accent_color or '#2563eb')
+    h1_style.spaceAfter = 16
+    h1_style.spaceBefore = 20
+    
+    h2_style = styles['Heading2']
+    h2_style.fontName = bold_font
+    h2_style.fontSize = fs * 1.4
+    h2_style.textColor = colors.HexColor(style.accent_color or '#2563eb')
+    h2_style.spaceAfter = 12
+    h2_style.spaceBefore = 16
+    h2_style.leftIndent = 0
+    h2_style.borderWidth = 0
+    h2_style.borderColor = colors.HexColor(style.accent_color or '#2563eb')
+    h2_style.borderPadding = (0, 0, 0, 8)
+    
+    h3_style = styles['Heading3']
+    h3_style.fontName = bold_font  
+    h3_style.fontSize = fs * 1.2
+    h3_style.textColor = colors.HexColor(style.accent_color or '#2563eb')
+    
+    # 创建彩色背景样式
+    highlight_style = ParagraphStyle(
+        'Highlight',
+        parent=normal_style,
+        backColor=colors.HexColor('#f0f7ff'),
+        borderColor=colors.HexColor(style.accent_color or '#2563eb'),
+        borderWidth=1,
+        borderPadding=8,
+        borderRadius=4
+    )
+    
+    flow = []
+    
+    # 添加页眉装饰
+    def add_page_decoration(canvas, doc):
+        canvas.saveState()
+        # 兼容设色（优先带 alpha，失败则降级）
+        try:
+            from reportlab.lib.colors import Color
+            canvas.setFillColor(Color(0.15, 0.39, 0.92, alpha=0.1))
+        except Exception:
+            canvas.setFillColorRGB(0.15, 0.39, 0.92)
+
+        canvas.rect(0, A4[1]-40, A4[0], 40, fill=1, stroke=0)
+        canvas.setFont(base_font, 9)
+        canvas.setFillColorRGB(0.5, 0.5, 0.5)
+        # 页码：reportlab 推荐用 canvas.getPageNumber()
+        try:
+            page_no = canvas.getPageNumber()
+        except Exception:
+            page_no = getattr(doc, "page", 1)
+        canvas.drawCentredString(A4[0]/2, 30, f"第 {page_no} 页")
+
+        canvas.restoreState()
+
+    
+    # 解析Markdown内容
+    for kind, payload in _iter_md_segments(md_text):
+        if kind == "text":
+            lines = (payload or "").splitlines()
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                
+                if not line:
+                    i += 1
+                    continue
+                
+                # 增强的标题解析 - 更容错
+                header_match = re.match(r'^(#{1,6})\s*(.+)$', line)
+                if header_match:
+                    level = len(header_match.group(1))
+                    title_text = header_match.group(2).strip()
+                    
+                    if level == 1:
+                        flow.append(Paragraph(_md_inline_to_rl(title_text, bold_font), h1_style))
+                    elif level == 2:
+                        flow.append(Paragraph(_md_inline_to_rl(title_text, bold_font), h2_style))
+                    elif level >= 3:
+                        flow.append(Paragraph(_md_inline_to_rl(title_text, bold_font), h3_style))
+                
+                # 处理没有空格的井号标题（容错）
+                elif re.match(r'^#{1,6}[^#\s]', line):
+                    level = 0
+                    for char in line:
+                        if char == '#':
+                            level += 1
+                        else:
+                            break
+                    title_text = line[level:].strip()
+                    
+                    if title_text:  # 确保有内容
+                        if level == 1:
+                            flow.append(Paragraph(_md_inline_to_rl(title_text, bold_font), h1_style))
+                        elif level == 2:
+                            flow.append(Paragraph(_md_inline_to_rl(title_text, bold_font), h2_style))
+                        elif level >= 3:
+                            flow.append(Paragraph(_md_inline_to_rl(title_text, bold_font), h3_style))
+                
+                # 列表处理
+                elif line.startswith("- ") or line.startswith("* "):
+                    list_items = []
+                    while i < len(lines) and (lines[i].strip().startswith("- ") or lines[i].strip().startswith("* ")):
+                        item_text = lines[i].strip()[2:].strip()
+                        list_items.append(ListItem(Paragraph(_md_inline_to_rl(item_text, bold_font), normal_style)))
+                        i += 1
+                    flow.append(ListFlowable(list_items, bulletType='bullet'))
+                    continue
+                
+                # 编号列表
+                elif re.match(r'^\d+\.\s+', line):
+                    list_items = []
+                    while i < len(lines) and re.match(r'^\d+\.\s+', lines[i].strip()):
+                        item_text = re.sub(r'^\d+\.\s+', '', lines[i].strip())
+                        list_items.append(ListItem(Paragraph(_md_inline_to_rl(item_text, bold_font), normal_style)))
+                        i += 1
+                    flow.append(ListFlowable(list_items, bulletType='1'))
+                    continue
+                
+                # 引用块
+                elif line.startswith("> "):
+                    quote_text = line[2:].strip()
+                    flow.append(Paragraph(_md_inline_to_rl(quote_text, bold_font), highlight_style))
+                
+                # 表格检测和处理
+                elif "|" in line and line.count("|") >= 2:
+                    table_lines = [line]
+                    j = i + 1
+                    while j < len(lines) and "|" in lines[j] and lines[j].count("|") >= 2:
+                        table_lines.append(lines[j]); j += 1
+
+                    # 解析表格：跳过分隔行（--- / :---:）
+                    rows: list[list[str]] = []
+                    sep_cell_re = re.compile(r'^:?-{3,}:?$')
+                    for tline in table_lines:
+                        cells = [c.strip() for c in tline.strip()[1:-1].split("|")]
+                        if cells and all(sep_cell_re.match(c or '') for c in cells):
+                            continue
+                        rows.append(cells)
+
+                    if rows:
+                        header = rows[0]
+                        body   = rows[1:]
+
+                        # 统一单位（pct -> %）
+                        table_data = [header] + [[_normalize_unit(c) for c in r] for r in body]
+
+                        # 构建表格
+                        table = Table(table_data)
+                        ts = [
+                            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor(style.accent_color or '#2563eb')),
+                            ('TEXTCOLOR',  (0, 0), (-1, 0), colors.whitesmoke),
+                            ('ALIGN',      (0, 0), (-1, -1), 'LEFT'),
+                            ('FONTNAME',   (0, 0), (-1, 0), bold_font),
+                            ('FONTNAME',   (0, 1), (-1, -1), base_font),
+                            ('FONTSIZE',   (0, 0), (-1, -1), fs * 0.9),
+                            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+                            ('TOPPADDING',    (0, 0), (-1, -1), 8),
+                            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#f8fafc')),
+                            ('GRID',       (0, 0), (-1, -1), 1, colors.HexColor('#e2e8f0')),
+                        ]
+
+                        # 环比/同比列上色
+                        delta_idx = [idx for idx, h in enumerate(header)
+                                     if ('环比' in h) or ('同比' in h) or h.strip().lower() in ('qoq','yoy','mom')]
+                        for r_i, row_vals in enumerate(body, start=1):  # 从第1行（非表头）开始
+                            for c_i in delta_idx:
+                                val = row_vals[c_i] if c_i < len(row_vals) else ''
+                                pol = _delta_polarity(val)
+                                if pol > 0:
+                                    col = colors.HexColor('#10b981')
+                                elif pol < 0:
+                                    col = colors.HexColor('#ef4444')
+                                else:
+                                    col = colors.HexColor('#6b7280')
+                                ts.append(('TEXTCOLOR', (c_i, r_i), (c_i, r_i), col))
+                                ts.append(('FONTNAME',  (c_i, r_i), (c_i, r_i), bold_font))
+
+                        table.setStyle(TableStyle(ts))
+                        flow.append(table)
+                        flow.append(Spacer(1, 8))
+                        i = j - 1
+                    else:
+                        flow.append(Paragraph(_md_inline_to_rl(line, bold_font), normal_style))
+                
+                # 普通段落
+                else:
+                    if line:  # 非空行才添加
+                        flow.append(Paragraph(_md_inline_to_rl(line, bold_font), normal_style))
+                
+                i += 1
+                
+        elif kind == "echarts":
+            # 图表处理
+            opt = _inject_palette(payload or {}, style.palette, style.theme)
+            png_data = _render_chart_png(opt, style)
+            if png_data:
+                try:
+                    img = RLImage(io.BytesIO(png_data))
+                    img.drawHeight = (style.chart_height or 360) * 0.75  # PDF中缩小一些
+                    img.drawWidth = 400
+                    flow.append(img)
+                    flow.append(Spacer(1, 12))
+                except Exception:
+                    flow.append(Paragraph("图表渲染失败", normal_style))
+            else:
+                flow.append(Paragraph("```echarts 图表```", normal_style))
+    
+    # 构建PDF
+    doc.build(flow, onFirstPage=add_page_decoration, onLaterPages=add_page_decoration)
+    return buffer.getvalue()
+
 
 
 SYSTEM_PROMPT = (
@@ -989,85 +1987,120 @@ def beautify_run(payload: BeautifyPayload, _=Depends(auth_check)):
         if not md.strip():
             raise HTTPException(400, "空的 markdown")
 
+        logger.info(f"收到美化请求，样式配置: template={style.template_style}, theme={style.theme}")
+
         # 1) （可选）LLM轻度排版润色——不改事实
         improved_md = md
         if OPENAI_API_KEY and (payload.instructions or "").strip():
             try:
-                msgs = [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": json.dumps({
-                        "markdown": md,
-                        "instructions": payload.instructions
-                    }, ensure_ascii=False)}
-                ]
+                prompt = f"""
+请对以下Markdown报告进行结构和排版优化，要求：
+1. 不修改任何数据、数字、事实内容
+2. 优化段落结构和层次
+3. 增强可读性和专业性
+4. 保持原有的图表代码块不变
+5. 根据用户要求进行调整：{payload.instructions}
+
+原始内容：
+{md}
+
+请返回优化后的Markdown内容：
+"""
                 resp = llm.chat.completions.create(
-                    model=OPENAI_MODEL, messages=msgs, temperature=0.1, max_tokens=4096
+                    model=OPENAI_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.3
                 )
                 improved_md = resp.choices[0].message.content or md
+                logger.info("LLM结构优化完成")
             except Exception as e:
-                logger.warning("LLM beautify skipped: %s", e)
+                logger.warning(f"LLM优化失败，使用原始内容: {e}")
                 improved_md = md
 
-        # 2) HTML：把 ```echarts``` 替换成 <div class="echarts" ...> 再包裹页面
-        md_with_div = normalize_echarts_and_extract(improved_md, style.palette, style.theme)
-        body_html = md_to_html_naive(md_with_div)
-        # ★★ 新增：无论是否使用 LLM，都做结构增强（侧边栏 + 卡片）
+        # 2) HTML：把 ```echarts``` 替换成 <div class="echarts" ...>，再去掉误包裹的 markdown 围栏
+        md_with_charts = normalize_echarts_and_extract(improved_md, style.palette, style.theme)
+        md_with_charts = unwrap_markdown_table_fences(md_with_charts)   # ★ 新增一行
+
+        # 3) 注入KPI网格（支持用户配置）
+        md_with_kpis = inject_kpi_grid(md_with_charts, style)
+        
+        # 4) 转换为HTML并应用布局
+        body_html = md_to_html_naive(md_with_kpis)
         body_html = apply_layout_cards_and_toc(body_html, style.theme or "light")
         html_doc = build_html_document(body_html, style)
 
-
-        # 3) 导出/上传
+        # 5) 导出/上传
+                # 5) 导出/上传（逐项 try，互不影响）
         job_id = str(uuid.uuid4())
-        day = dt.datetime.utcnow().strftime("%Y%m%d")
-        base_path = f"{day}/{job_id}"
+        timestamp = dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
         result = {
             "job_id": job_id,
-            "generated_at": dt.datetime.utcnow().isoformat(),
-            "html": html_doc if not EXPORT_ENABLED else None
+            "timestamp": timestamp,
+            "style_applied": {
+                "template": style.template_style,
+                "theme": style.theme,
+                "font_family": style.font_family,
+                "accent_color": style.accent_color,
+                "show_kpi_cards": style.show_kpi_cards,
+                "show_toc_sidebar": style.show_toc_sidebar,
+            }
         }
 
-        if EXPORT_ENABLED:
-            # 3.1 先生成三个文件的 bytes
-            #    DOCX/PDF 用 improved_md（保留 ```echarts```，我会把图转 PNG 后嵌入）
-            docx_bytes = export_docx_from_md(improved_md, style)
-            pdf_bytes  = export_pdf_from_md(improved_md, style)
+        if not EXPORT_ENABLED:
+            result["html"] = html_doc
+            logger.info("仅返回HTML内容（导出已禁用）")
+            return result
+
+        # === HTML ===
+        try:
+            html_path = f"beautified/{job_id}/report_{timestamp}.html"
             html_bytes = html_doc.encode("utf-8")
+            html_pub = _upload(html_path, html_bytes, "text/html")
+            result["html_url"] = _make_download_url(html_path, html_pub, f"report_{timestamp}.html")
+        except Exception as e:
+            logger.error("HTML 导出失败: %s", e)
+            # 兜底直接放内联 HTML，前端至少能“下载 HTML”
+            result["html"] = html_doc
+            result["html_error"] = str(e)
 
-            # 3.2 上传
-            # HTML
-            html_path = f"{base_path}/beautified.html"
-            html_url = _upload(html_path, html_bytes, "text/html; charset=utf-8")
-            html_dl  = _make_download_url(html_path, html_url, "beautified.html")
+        # === DOCX ===
+        try:
+            docx_bytes = export_docx_from_md(improved_md, style)
+            docx_path = f"beautified/{job_id}/report_{timestamp}.docx"
+            docx_pub = _upload(docx_path, docx_bytes,
+                               "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            result["docx_url"] = _make_download_url(docx_path, docx_pub, f"report_{timestamp}.docx")
+        except Exception as e:
+            logger.error("DOCX 导出失败: %s", e)
+            result["docx_error"] = str(e)
 
-            # DOCX
-            docx_path = f"{base_path}/beautified.docx"
-            docx_url = _upload(
-                docx_path,
-                docx_bytes,
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
-            docx_dl  = _make_download_url(docx_path, docx_url, "beautified.docx")
+        # === PDF ===
+        try:
+            pdf_bytes = export_pdf_from_md(improved_md, style)
+            pdf_path = f"beautified/{job_id}/report_{timestamp}.pdf"
+            pdf_pub = _upload(pdf_path, pdf_bytes, "application/pdf")
+            result["pdf_url"] = _make_download_url(pdf_path, pdf_pub, f"report_{timestamp}.pdf")
+        except Exception as e:
+            logger.error("PDF 导出失败: %s", e)
+            result["pdf_error"] = str(e)
 
-            # PDF
-            pdf_path = f"{base_path}/beautified.pdf"
-            pdf_url = _upload(pdf_path, pdf_bytes, "application/pdf")
-            pdf_dl  = _make_download_url(pdf_path, pdf_url, "beautified.pdf")
-
-            result.update({
-                "html_url": html_url,
-                "html_download_url": html_dl,
-                "docx_url": docx_url,
-                "docx_download_url": docx_dl,
-                "pdf_url": pdf_url,
-                "pdf_download_url": pdf_dl,
-                "file_name": "beautified_report"
-            })
-
+        # === PPTX（新增）===
+        try:
+            pptx_bytes = export_pptx_from_md(improved_md, style)
+            pptx_path = f"beautified/{job_id}/report_{timestamp}.pptx"
+            pptx_pub = _upload(pptx_path, pptx_bytes, "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+            result["pptx_url"] = _make_download_url(pptx_path, pptx_pub, f"report_{timestamp}.pptx")
+        except Exception as e:
+            logger.error("PPTX 导出失败: %s", e)
+            result["pptx_error"] = str(e)
+            
         return result
+
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("beautify failed: %s\n%s", e, traceback.format_exc())
-        raise HTTPException(500, f"beautify failed: {e}")
+        logger.error(f"处理请求失败: {traceback.format_exc()}")
+        raise HTTPException(500, f"处理失败: {str(e)}")
+

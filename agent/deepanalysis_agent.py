@@ -18,6 +18,11 @@ import json, re
 from math import isfinite
 
 # 更鲁棒：无论在什么工作目录启动，都能找到.env.local
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Any
+import datetime as _dt
+import requests
+
 
 
 
@@ -31,13 +36,19 @@ LLM_KEY   = os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY") or ""
 LLM_MODEL = os.getenv("OPENAI_MODEL") or os.getenv("LLM_MODEL") or ""
 LLM_CONNECT_TIMEOUT = int(os.getenv("LLM_CONNECT_TIMEOUT") or 30)   # 原来 5
 LLM_READ_TIMEOUT    = int(os.getenv("LLM_READ_TIMEOUT")    or 90)   # 原来 20
+# 是否在维度下钻里隐藏完整表，仅输出 TOP 表（默认是）
+COMPACT_DIMENSION_TABLES = (os.getenv("COMPACT_DIMENSION_TABLES") or "true").lower() == "true"
+# === Google CSE for policy/news ===
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "").strip()
+GOOGLE_CSE_ID  = os.getenv("GOOGLE_CSE_ID", "").strip()
 
 
 print("[deepanalysis LLM]", LLM_BASE, LLM_MODEL)  # 启动日志明确当前配置
 
 # 开发期是否跳过鉴权
 DEV_BYPASS_AUTH = (os.getenv("DEV_BYPASS_AUTH") or "true").lower() == "true"
-
+# 思考结束0.5秒后再生成结果
+THOUGHT_DELAY_MS = int(os.getenv("THOUGHT_DELAY_MS") or "600")  # 最少 0.6s
 # 下游 dataquery_agent
 DATA_AGENT_BASE_URL = (
     os.getenv("DATA_AGENT_BASE_URL") or os.getenv("DATA_API") or "http://127.0.0.1:18010"
@@ -69,34 +80,36 @@ PROMPT_PLANNER = os.getenv("PROMPT_PLANNER", """
 """).strip()
 
 PROMPT_ANALYST = os.getenv("PROMPT_ANALYST", """
-你是资深财务分析师。输入给你：
-- indicator_card（含最新值、同比/环比、目标差距）
-- resolved（公司/指标/期间）
-- sections（已执行的下钻结果：维度/指标/业务/异动等，可能包含表格与图表）
+你是资深财务分析师。输入：
+- indicator_card：含最新值/同比/环比/目标差距
+- resolved：公司/指标/期间/模式
+- sections：本次所有子任务的结果（维度/业务/异动/政策等）
 
-请你**只产出最终给高管看的结果**，严格以 JSON 返回：
+请先**读取所有 sections** 与 indicator_card，再给出高管可读的**一次性最终输出**，仅返回 JSON：
 {
-  "summary": "中文结论与建议（最多5行；每行用**加粗关键词**起头，如 **总体**/**港口**/**金融**/**地产** 等）",
+  "summary": "1) **指标整体描述**：…\\n2) **下钻要点**（合并维度/业务）：…\\n3) **高贡献项**：…；**异常项**：…\\n4) **政策影响（仅一次）**：…\\n5) **风险**：…；**建议方向**：…",
   "extra_sections": [
-    {"title": "维度解读", "message": "1) **本期贡献**：...\\n2) **同比/环比**：...\\n3) **风险与建议**：..."}
+    {"title": "业务拆解", "message": "1) 本期贡献…\\n2) 同比/环比差异…"},
+    {"title": "异动与归因", "message": "…"}
   ]
 }
-
 硬性要求：
-- **禁止**输出任何“思考过程/推理/规划/分析步骤”等字样的章节或段落；
-- **不要重复绘制图表**：如已有维度下钻的饼图，则不再新增图表；确需图表时最多1个；
-- message 用数字序号/短横线分点，少量数字，多用概括；对核心名词加粗；
-- 仅返回 JSON。
+- **必须**综合所有子任务再下结论；不要输出思考/步骤；不要重复绘图；信息不足也给出通用框架。
 """).strip()
 
 
 
+
 PROMPT_POLICY = os.getenv("PROMPT_POLICY", """
-你是企业政策影响分析师。基于公司、指标、期间与已知下钻结果，
-给出与该指标相关的“上下文政策”及可能的影响路径，JSON 返回：
+你是企业政策影响分析师。输入给你：
+- resolved（公司/指标/期间）
+- sections（已执行的下钻结果）
+- policy_news（如有：来自 Google CSE 的政策/监管搜索命中，数组，每项含 title/link/snippet/source/date）
+
+请结合 policy_news（若存在）与已知上下文，产出与该指标相关的“政策上下文”及可能的影响路径，JSON 返回：
 {
   "title": "政策上下文",
-  "message": "中文段落，覆盖相关政策（名称级别或条目级）、口径差异与影响机制",
+  "message": "中文段落，覆盖政策名称/级别或关键条目、口径差异与影响机制；可引用policy_news的关键信息（不需要粘贴链接本身）",
   "table": [{"policy":"政策要点","impact":"可能影响路径","risk":"风险点/注意事项"}]
 }
 仅返回 JSON，不要多余文本；如信息不足，请给出合理的通用框架。
@@ -112,6 +125,15 @@ def _extract_json_block(s: str) -> Optional[dict]:
         if m: s = m.group(1)
     try: return _json.loads(s)
     except Exception: return None
+
+def _down_headers(token: Optional[str]) -> dict:
+    h = {"Content-Type": "application/json"}
+    t = (token or "").strip()
+    if t.lower().startswith("bearer "):
+        h["Authorization"] = t
+    elif t:
+        h["Authorization"] = f"Bearer {t}"
+    return h
 
 def llm_chat(system: str, user: str, *, temperature: float = 0.3, want_json: bool = False):
     """
@@ -182,6 +204,90 @@ def llm_chat(system: str, user: str, *, temperature: float = 0.3, want_json: boo
         return {} if want_json else None
 
 
+def _quarter_bounds(year: int, q: str) -> tuple[str, str]:
+    qn = int(str(q).upper().replace("Q",""))
+    start_month = (qn-1)*3 + 1
+    end_month   = start_month + 2
+    start = _dt.date(year, start_month, 1)
+    # 取该季度最后一天（下季度第一天-1）
+    if end_month == 12:
+        end = _dt.date(year, 12, 31)
+    else:
+        end = _dt.date(year, end_month+1, 1) - _dt.timedelta(days=1)
+    return (start.isoformat(), end.isoformat())
+
+def _google_cse_policy_search(company_name: str|None, industry: str|None,
+                              year: int, quarter: str, limit: int = 6) -> list[dict]:
+    """
+    用 Google CSE 搜索该季度内与行业/公司相关的政策与监管/口径动态。
+    采用【正向约束】：权威域名白名单 + 政策/金融/监管等口径词必含，避免无关结果。
+    返回：[{title, link, snippet, source, date}]
+    """
+    if not (GOOGLE_API_KEY and GOOGLE_CSE_ID):
+        return []
+    qs, qe = _quarter_bounds(year, quarter)
+
+    keys = [k for k in [industry, company_name] if k]
+
+    extra = ""
+    ind = (industry or "")
+    if any(x in ind for x in ["港", "码头", "航运", "集装箱"]):
+        extra = " (港口 OR 航运 OR 集装箱 OR 口岸 OR 通关 OR 货运)"
+    elif "金融" in ind:
+        extra = " (金融 OR 银行 OR 保险 OR 证券 OR 贷款 OR 融资)"
+    elif ("地产" in ind) or ("房地产" in ind):
+        extra = " (房地产 OR 土地 OR 预售 OR 住建 OR 融资监管)"
+
+    kw = "(政策 OR 通知 OR 指引 OR 意见 OR 办法 OR 监管 OR 宏观 OR 货币政策 OR 税 OR 财政 OR 国资 OR 发改)"
+    base = " ".join(keys) + f" {kw}{extra} {year}年"
+
+    params = {
+        "key": GOOGLE_API_KEY,
+        "cx":  GOOGLE_CSE_ID,
+        "q":   base,
+        "num": min(max(limit,1),10),
+        "sort": "date",
+    }
+
+    # 权威域名白名单（只保留这些或其子域）
+    white_domains = [
+        "gov.cn", "ndrc.gov.cn", "mof.gov.cn", "pbc.gov.cn", "csrc.gov.cn",
+        "cbirc.gov.cn", "safe.gov.cn", "sasac.gov.cn", "stats.gov.cn",
+        "mot.gov.cn", "customs.gov.cn", "sse.com.cn", "szse.cn",
+        "people.com.cn", "xinhuanet.com", "ce.cn", "china.com.cn"
+    ]
+    def domain_ok(src: str) -> bool:
+        return any(src.endswith(d) or (("." + d) in src) for d in white_domains)
+
+    # 政策/金融/监管口径必含（标题+摘要）
+    must_tokens = ["政策","通知","意见","办法","监管","宏观","货币","财政","税","国资","发改","银行","证券","保险","港口","航运","物流","口岸","通关","融资","贷款","住建","土地"]
+
+    try:
+        r = requests.get("https://www.googleapis.com/customsearch/v1", params=params, timeout=15)
+        r.raise_for_status()
+        items = r.json().get("items", []) or []
+        out = []
+        for it in items:
+            title = it.get("title") or ""
+            snip  = it.get("snippet") or ""
+            src   = (it.get("displayLink") or "").lower()
+            text  = (title + " " + snip)
+            if not domain_ok(src):           # 1) 权威域名
+                continue
+            if not any(tok in text for tok in must_tokens):  # 2) 口径词
+                continue
+            out.append({
+                "title":   title,
+                "link":    it.get("link"),
+                "snippet": snip,
+                "source":  src,
+                "date":    None
+            })
+        return out
+    except Exception:
+        return []
+
+    
 def _sb_headers():
     return {
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
@@ -502,9 +608,12 @@ def get_indicator_card(question: str, company: Optional[str], metric: Optional[s
     if company and metric and year and quarter:
         q = ""
     payload = {"question": q, "company": company, "metric": metric, "year": year, "quarter": quarter, "scenario": "actual"}
-    r = requests.post(f"{DATA_AGENT_BASE_URL}/metrics/query",
-        headers={"Authorization": f"Bearer {DATA_AGENT_TOKEN}", "Content-Type":"application/json"},
-        json=payload, timeout=30)
+    r = requests.post(
+        f"{DATA_AGENT_BASE_URL}/metrics/query",
+        headers=_down_headers(DATA_AGENT_TOKEN),
+        json=payload,
+        timeout=30
+    )
     if r.status_code >= 400: 
         raise HTTPException(502, f"dataquery_agent 调用失败: {r.text}")
     return r.json()
@@ -627,7 +736,8 @@ def _wrap_contrib_rows(contrib: List[Dict[str, Any]], cn_map: Dict[str,str]) -> 
         })
     return rows
 
-def _drill_dimension(company_row: Dict[str, Any], metric_name: str, year: int, quarter_int: int) -> Dict[str, Any]:
+def _drill_dimension(company_row: Dict[str, Any], metric_name: str, year: int, quarter_int: int, top_k: int = 3) -> Dict[str, Any]:
+
     """
     维度下钻（严格要求）：
     1) 用 company_catalog.id → parent_id 找到所有子公司；
@@ -669,10 +779,11 @@ def _drill_dimension(company_row: Dict[str, Any], metric_name: str, year: int, q
         try:
             r = requests.post(
                 f"{DATA_AGENT_BASE_URL}/metrics/query",
-                headers={"Authorization": f"Bearer {DATA_AGENT_TOKEN}",
-                         "Content-Type": "application/json"},
-                json=payload, timeout=30
+                headers=_down_headers(DATA_AGENT_TOKEN),
+                json=payload,
+                timeout=30
             )
+
             if r.status_code >= 400:
                 probe.append({"name": child_name, "ok": False, "reason": f"HTTP {r.status_code}"})  # [ADD]
                 continue
@@ -712,24 +823,32 @@ def _drill_dimension(company_row: Dict[str, Any], metric_name: str, year: int, q
 
     # TOP（按绝对变动）
     def _abs_or_neg1(v): return abs(v) if isinstance(v, (int, float)) else -1
-    yoy_top = sorted(rows, key=lambda x: _abs_or_neg1(x.get("yoy_delta")), reverse=True)[:3]
-    qoq_top = sorted(rows, key=lambda x: _abs_or_neg1(x.get("qoq_delta")), reverse=True)[:3]
+    yoy_top = sorted(rows, key=lambda x: _abs_or_neg1(x.get("yoy_delta")), reverse=True)[:max(1, int(top_k))]
+    qoq_top = sorted(rows, key=lambda x: _abs_or_neg1(x.get("qoq_delta")), reverse=True)[:max(1, int(top_k))]
 
     # **只绘制一个**饼图（当前值占比）
     chart = {"type": "pie", "data": [{"name": r["company"], "value": r.get("current") or 0} for r in rows]}
 
-    ok_names = [p["name"] for p in probe if p.get("ok")]            # [ADD]
-    fail_names = [p["name"] for p in probe if not p.get("ok")]      # [ADD]
-    tip = f"（子公司共{len(found_names)}家，成功{len(ok_names)}，未命中{len(fail_names)}）"  # [ADD]
+    ok_names = [p["name"] for p in probe if p.get("ok")]
+    fail_names = [p["name"] for p in probe if not p.get("ok")]
+    tip = f"（子公司共{len(found_names)}家，成功{len(ok_names)}，未命中{len(fail_names)}）"
+
+    # 👇 精简模式：隐藏完整表，仅保留 TOP 和饼图；完整表塞到 debug.table_full
+    table_to_return = [] if COMPACT_DIMENSION_TABLES else rows
+    debug_extra = {
+        "children_found": found_names,
+        "data_calls": probe,
+        "table_full": rows if COMPACT_DIMENSION_TABLES else None
+    }
 
     return {
         "type": "dimension",
         "title": "维度下钻",
-        "message": "从子公司层面看，以下指标对总值的贡献如下（按当前值占比）：" + tip,  # [MOD: 仅追加 tip]
+        "message": f"从子公司层面看，展示同比/环比 TOP{max(1, int(top_k))} 与当前值占比饼图。" + tip,
         "conclusion": {"yoy_top": yoy_top, "qoq_top": qoq_top},
-        "table": rows,
+        "table": table_to_return,       # ← 精简：这里为空数组时前端自然不再渲染第三张表
         "chart": chart,
-        "debug": {"children_found": found_names, "data_calls": probe}  # [ADD]
+        "debug": debug_extra
     }
 
 
@@ -819,6 +938,10 @@ class AnalyzeReq(BaseModel):
     modes: List[DrillMode] = Field(default_factory=list)
     business_formula_metric_name: Optional[str] = None
     top_k: int = 3
+    # 新增：控制政策段
+    skip_policy: bool = False
+    policy_only: bool = False
+
 
 class AnalyzeResp(BaseModel):
     indicator_card: Optional[Dict[str, Any]] = None
@@ -884,35 +1007,88 @@ def _analyze_core(req: AnalyzeReq, on_push=None) -> AnalyzeResp:
         push("分析问题中（意图识别/规划）", "error", detail=e)
 
     # (B) 下钻
-    push("下钻执行中", "start")
-    for mode in req.modes:
-        if mode == DrillMode.dimension:
-            sections.append(_drill_dimension(comp_row, canon_metric, year, quarter_int))
-        elif mode == DrillMode.metric:
-            sections.append(_drill_metric(comp_row, canon_metric, year, quarter_int))
-        elif mode == DrillMode.business:
-            biz_metric = req.business_formula_metric_name or canon_metric
-            sections.append(_drill_business(comp_row, biz_metric, year, quarter_int))
-        elif mode == DrillMode.anomaly:
-            sections.append(_drill_anomaly(comp_row, year, quarter_int, max(1, int(req.top_k))))
-        else:
-            sections.append({"type": "unknown", "message": f"未知模式：{mode}"})
-    push("下钻执行中", "done")
+    if not req.policy_only and req.modes:
+        push("下钻执行中", "start")
+        for mode in req.modes:
+            if mode == DrillMode.dimension:
+                sections.append(_drill_dimension(comp_row, canon_metric, year, quarter_int, max(1, int(req.top_k))))
+            elif mode == DrillMode.metric:
+                sections.append(_drill_metric(comp_row, canon_metric, year, quarter_int))
+            elif mode == DrillMode.business:
+                biz_metric = req.business_formula_metric_name or canon_metric
+                sections.append(_drill_business(comp_row, biz_metric, year, quarter_int))
+            elif mode == DrillMode.anomaly:
+                sections.append(_drill_anomaly(comp_row, year, quarter_int, max(1, int(req.top_k))))
+            else:
+                sections.append({"type": "unknown", "message": f"未知模式：{mode}"})
+        push("下钻执行中", "done")
 
-    # (C) 政策上下文
-    try:
-        push("调用分析agent大模型中（政策上下文）", "start")
-        pol_ctx = {
-            "resolved": {"company": plan_ctx["company"], "metric": canon_metric, "year": year, "quarter": quarter_int},
-            "sections": sections,
-        }
-        pol_json = llm_chat(PROMPT_POLICY, json.dumps(pol_ctx, ensure_ascii=False), want_json=True, temperature=0.3)
-        if isinstance(pol_json, dict) and (pol_json.get("message") or pol_json.get("table") or pol_json.get("chart")):
-            sections.append({"type": "policy", **pol_json})
-        push("调用分析agent大模型中（政策上下文）", "done",
-             detail=(pol_json.get("message")[:200] if isinstance(pol_json, dict) and pol_json.get("message") else None))
-    except Exception as e:
-        push("调用分析agent大模型中（政策上下文）", "error", detail=e)
+    #     # (C) 政策上下文
+    # if not req.skip_policy:
+    #     try:
+    #         # ① 先做“政策候选检索”并把结果明确写进进度与 sections
+    #         push("政策检索（候选）", "start")
+    #         industry = (comp_row.get("business_unit")) or None
+
+    #         policy_hits = []
+    #         # if not (GOOGLE_API_KEY and GOOGLE_CSE_ID):
+    #         #     # 未配置密钥：明确告诉前端“为什么没有去检索”
+    #         #     push("政策检索（候选）", "done", detail="未配置 GOOGLE_API_KEY/CSE_ID，跳过检索")
+    #         #     sections.append({
+    #         #         "type": "policy_info",
+    #         #         "title": "政策检索状态",
+    #         #         "message": "未配置 GOOGLE_API_KEY/CSE_ID，跳过政策候选检索；下文仅给出通用框架。"
+    #         #     })
+    #         # else:
+    #         #     try:
+    #         #         policy_hits = _google_cse_policy_search(
+    #         #             company_name=plan_ctx["company"],
+    #         #             industry=industry,
+    #         #             year=year,
+    #         #             quarter=f"Q{quarter_int}",
+    #         #             limit=6
+    #         #         )
+    #         #         push("政策检索（候选）", "done", detail=f"{len(policy_hits)} 条")
+    #         #     except Exception as e:
+    #         #         # 检索异常：也要把原因回传到进度里
+    #         #         policy_hits = []
+    #         #         push("政策检索（候选）", "done", detail=f"检索失败：{e}")
+    #         #         sections.append({
+    #         #             "type": "policy_info",
+    #         #             "title": "政策检索状态",
+    #         #             "message": f"政策候选检索失败：{e}"
+    #         #         })
+    #         # # 把候选清单单独落一节（先展示列表，再做影响分析）
+    #         # # —— 原来这里直接开始拼 policy_candidates / 做政策上下文 —— 
+    #         # # 现在改成：
+    #         # if not req.skip_policy:
+    #         #     # 把候选清单单独落一节（先展示列表，再做影响分析）
+    #         #     if policy_hits:
+    #         #         sections.append({
+    #         #             "type": "policy_candidates",
+    #         #             "title": "政策候选清单",
+    #         #             "table": [{"title": h.get("title"), "source": h.get("source"), "snippet": h.get("snippet")} for h in policy_hits]
+    #         #         })
+
+    #         #     # ② 再做“政策上下文/影响路径”的 LLM 归纳
+    #         #     push("调用分析agent大模型中（政策上下文）", "start")
+    #         #     pol_ctx = {
+    #         #         "resolved": {"company": plan_ctx["company"], "metric": canon_metric, "year": year, "quarter": quarter_int},
+    #         #         "sections": sections,
+    #         #         "policy_news": policy_hits
+    #         #     }
+    #         #     pol_json = llm_chat(PROMPT_POLICY, json.dumps(pol_ctx, ensure_ascii=False), want_json=True, temperature=0.3)
+    #         #     if isinstance(pol_json, dict) and (pol_json.get("message") or pol_json.get("table") or pol_json.get("chart")):
+    #         #         sections.append({"type": "policy", **pol_json})
+    #         #     push("调用分析agent大模型中（政策上下文）", "done",
+    #         #         detail=(pol_json.get("message")[:200] if isinstance(pol_json, dict) and pol_json.get("message") else None))
+    #         # # ← 这一大段包裹结束
+
+    #     except Exception as e:
+    #         push("调用分析agent大模型中（政策上下文）", "error", detail=e)
+
+    # if req.policy_only:
+    #     return AnalyzeResp(indicator_card=None, resolved=plan_ctx, sections=sections, summary=None, progress=progress)
 
     # (D) 最终整理
     push("调用分析agent大模型中（最终整理）", "start")
@@ -1094,23 +1270,21 @@ def analyze(req: AnalyzeReq, _=Depends(require_token)):
 
 # === 新增：SSE 流式接口 ===
 @app.post("/deepanalysis/analyze/stream")
+# deepanalysis_agent.py -> analyze_stream()
 async def analyze_stream(req: AnalyzeReq, _=Depends(require_token)):
     async def event_gen():
         q: asyncio.Queue = asyncio.Queue()
 
         def on_push(ev: Dict[str, Any]):
-            # 推进度事件
-            try:
-                q.put_nowait(("progress", ev))
-            except Exception:
-                pass
+            try: q.put_nowait(("progress", ev))
+            except Exception: pass
 
-        # 在后台线程里跑同步核心逻辑
         task = asyncio.create_task(asyncio.to_thread(_analyze_core, req, on_push))
 
-        done_sent = False
         while True:
-            if task.done() and not done_sent:
+            if task.done():
+                # ← 在真正发送最终结果之前，等至少 THOUGHT_DELAY_MS
+                await asyncio.sleep(max(THOUGHT_DELAY_MS, 500)/1000.0)
                 try:
                     resp: AnalyzeResp = task.result()
                     payload = json.dumps(resp.dict(), ensure_ascii=False)
@@ -1123,8 +1297,8 @@ async def analyze_stream(req: AnalyzeReq, _=Depends(require_token)):
                 typ, ev = await asyncio.wait_for(q.get(), timeout=0.1)
                 yield f"event: {typ}\ndata:{json.dumps(ev, ensure_ascii=False)}\n\n"
             except asyncio.TimeoutError:
-                # 继续等
                 continue
+
 
     return StreamingResponse(event_gen(), media_type="text/event-stream")
 

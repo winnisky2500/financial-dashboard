@@ -15,8 +15,9 @@ import { supabase } from "@/lib/supabase";
 import {
   PieChart as RPieChart, Pie, Tooltip, Legend, ResponsiveContainer,
   BarChart as RBarChart, Bar, XAxis, YAxis,
-  LineChart as RLineChart, Line, Cell
-} from "recharts"; // ← 新增 Cell
+  LineChart as RLineChart, Line, Cell, CartesianGrid
+} from "recharts";
+
 
 const GRADIENTS = [
   ["#7C3AED","#C4B5FD"], ["#0EA5E9","#93C5FD"], ["#22C55E","#A7F3D0"],
@@ -24,14 +25,33 @@ const GRADIENTS = [
   ["#A855F7","#D8B4FE"], ["#3B82F6","#93C5FD"]
 ];
 
-const AutoChart: React.FC<{ cfg: { type:"pie"|"bar"|"line"; data:any[]; xKey?:string; yKey?:string; nameKey?:string } }> = ({ cfg }) => {
+const buildAuthHeader = () => {
+  const t =
+    (import.meta as any).env?.VITE_ROE_AGENT_TOKEN ||
+    (import.meta as any).env?.VITE_DATA_AGENT_TOKEN ||
+    "";
+  return t ? { Authorization: `Bearer ${t}` } : {};
+};
+
+const AutoChart: React.FC<{ cfg: { type:"pie"|"bar"|"line"; data: any[]; xKey?:string; yKey?:string; nameKey?:string; title?:string } }> = ({ cfg }) => {
+
   const xKey = cfg.xKey || "name";
   const yKey = cfg.yKey || "value";
   const nameKey = cfg.nameKey || "name";
+  const fmtTick = (v: any) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v ?? "");
+    const abs = Math.abs(n);
+    if (abs >= 1e8) return (n/1e8).toFixed(1).replace(/\.0$/,"") + "亿";
+    if (abs >= 1e4) return (n/1e4).toFixed(1).replace(/\.0$/,"") + "万";
+    if (abs >= 1e3) return (n/1e3).toFixed(1).replace(/\.0$/,"") + "千";
+    return n.toLocaleString();
+  };
 
   if (cfg.type === "pie") {
     return (
-      <div className="w-[520px] max-w-full h-[320px]">
+      <div className="w-[520px] max-w-full h-[340px]"><div className="text-sm font-medium text-gray-700 mb-1">{cfg.title}</div>
+
         <ResponsiveContainer width="100%" height="100%">
           <RPieChart>
             <defs>
@@ -52,56 +72,91 @@ const AutoChart: React.FC<{ cfg: { type:"pie"|"bar"|"line"; data:any[]; xKey?:st
     );
   }
 
-  if (cfg.type === "bar") {
-    return (
-      <div className="w-[640px] max-w-full h-[320px]">
-        <ResponsiveContainer width="100%" height="100%">
-          <RBarChart data={cfg.data}>
-            <XAxis dataKey={xKey} /><YAxis />
-            <Tooltip /><Legend />
-            <Bar dataKey={yKey} />
-          </RBarChart>
-        </ResponsiveContainer>
-      </div>
-    );
-  }
+if (cfg.type === "bar") {
+  const values = Array.isArray(cfg.data) ? cfg.data.map((d:any)=>Number(d?.[yKey])).filter((n:number)=>Number.isFinite(n)) : [];
+  const minV = values.length ? Math.min(...values) : undefined;
+  const maxV = values.length ? Math.max(...values) : undefined;
+  const pad  = (minV!==undefined && maxV!==undefined) ? Math.max((maxV - minV) * 0.05, Math.abs(maxV||0) * 0.05) : undefined;
+  const domain:any = (minV===undefined || maxV===undefined) ? ["auto","auto"] : [minV - pad!, maxV + pad!];
 
-  // line
   return (
-    <div className="w-[640px] max-w-full h-[320px]">
-      <ResponsiveContainer width="100%" height="100%">
-        <RLineChart data={cfg.data}>
-          <XAxis dataKey={xKey} /><YAxis />
+    <div className="w-[640px] max-w-full h-[360px]">
+      {cfg.title && <div className="text-sm font-semibold mb-2 text-gray-700">{cfg.title}</div>}
+      <ResponsiveContainer width="100%" height="90%">
+        <RBarChart data={cfg.data} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
+          <XAxis dataKey={xKey} /><YAxis tickFormatter={fmtTick} /><CartesianGrid strokeDasharray="3 3" />
           <Tooltip /><Legend />
-          <Line type="monotone" dataKey={yKey} dot={false} />
-        </RLineChart>
+          <Bar dataKey={yKey} />
+        </RBarChart>
+
       </ResponsiveContainer>
     </div>
   );
+}
+
+  // line
+// line
+if (cfg.type === "line") {
+  const values = Array.isArray(cfg.data)
+    ? cfg.data.map((d: any) => Number(d?.[yKey])).filter((n: number) => Number.isFinite(n))
+    : [];
+  const minV = values.length ? Math.min(...values) : undefined;
+  const maxV = values.length ? Math.max(...values) : undefined;
+  const pad  = (minV !== undefined && maxV !== undefined)
+    ? Math.max((maxV - minV) * 0.05, Math.abs(maxV || 0) * 0.05)
+    : undefined;
+  const domain: any = (minV === undefined || maxV === undefined)
+    ? ["auto", "auto"]
+    : [minV - pad!, maxV + pad!];
+
+  return (
+    <div className="w-[640px] max-w-full h-[360px]">
+      {cfg.title && <div className="text-sm font-semibold mb-2 text-gray-700">{cfg.title}</div>}
+      <ResponsiveContainer width="100%" height="90%">
+        <RLineChart data={cfg.data} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
+          <XAxis dataKey={xKey} /><YAxis tickFormatter={fmtTick} /><CartesianGrid strokeDasharray="3 3" />
+          <Tooltip /><Legend />
+          <Line type="monotone" dataKey={yKey} dot={false} />
+        </RLineChart>
+
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// 兜底（理应不会触发）
+return null;
+
+
 };
 
 
 
 /* =================== Types =================== */
 type AnalysisMode = "dimension" | "metric" | "business" | "anomaly";
-type Step = {
-  label: string;
-  status: "pending" | "doing" | "done" | "error";
-  detail?: string;
-};
+
 type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   timestamp: string;
   images?: string[];
-  indicatorCard?: DataQueryResp['indicator_card'];
-  chart?: { type: "pie" | "bar" | "line"; data: any[]; xKey?: string; yKey?: string; nameKey?: string };
+
+  /** 多个指标卡合并展示 */
+  indicatorCards?: NonNullable<DataQueryResp['indicator_card']>[];
+
+  /** 本轮模型生成的推荐追问 */
+  suggestions?: string[];
+
+  chart?: { type: "pie" | "bar" | "line"; data: any[]; xKey?: string; yKey?: string; nameKey?: string; title?: string };
   debug?: any;
   progress?: Step[];
   collapsed?: boolean;
-  /** ✅ 新增：后端返回的逐步原始日志，放在对话里折叠显示 */
+  /** 后端原始进度日志（可折叠） */
   progressRaw?: any[];
 };
+
+
+
 
 
 
@@ -117,6 +172,8 @@ interface UploadedFile {
   processed: boolean;
   processResult?: any;
 }
+
+const AUTH = (import.meta as any).env?.VITE_DATA_AGENT_TOKEN;
 
 /* =================== UI Tabs (kept) =================== */
 const analysisTabsConfig = [
@@ -138,6 +195,9 @@ const INTENT_API: string =
   (import.meta as any).env?.VITE_INTENT_AGENT_URL ??
   "http://127.0.0.1:18040";
 
+  // 对话上下文轮数（Environment: VITE_DIALOG_CTX_ROUNDS，默认3）
+const DIALOG_CTX_ROUNDS = Number((import.meta as any).env?.VITE_DIALOG_CTX_ROUNDS) || 3;
+
 /* =================== Deep Analysis agent base =================== */
 // Deep Analysis agent base
 const DEEP_API: string =
@@ -155,13 +215,13 @@ const DATA_FAST_API: string =
 /* =================== Suggestions =================== */
 const BASE_SUGGESTIONS = [
   "2024 Q2 XX港口公司的营业收入是多少？",
-  "2024 年 Q1 XX集团公司的总资产周转率？",
+  "2024 年 Q1 XX集团公司的总资产周转率是多少？",
 ];
 const MODE_SUGGESTIONS: Record<AnalysisMode, string[]> = {
-  dimension: ["对比 XX集团公司 2024 年各季度营业收入", "维度下钻 XX集团公司 2025 Q2 自由现金流"],
-  metric:   ["分析一下 XX港口公司 2024 Q2 的 ROE", "XX集团公司 2024 Q2 的净利率是多少？"],
+  dimension: ["对比 XX集团公司 2024 年各季度自由现金流", "维度下钻 XX集团公司 2025 Q2 平均应收账款"],
+  metric:   ["分析一下 XX港口公司 2024 Q2 的 ROE", "分析 XX集团公司 2024 Q2 的总资产周转率"],
   business: ["杜邦分析 XX地产公司 2025 Q1 的ROE"],
-  anomaly:  ["找出 2024 Q2 同比/环比波动最大的指标", "哪些公司 2024 Q2 ROE 变化最异常？"],
+  anomaly:  ["分析 2024 Q2 XX金融公司的应收账款周转率"],
 };
 function getQuickQuestions(selected: Set<AnalysisMode>): string[] {
   const extra = Array.from(selected).flatMap((m) => MODE_SUGGESTIONS[m] ?? []);
@@ -284,6 +344,22 @@ async function askData(question: string, ctrl: AbortController): Promise<DataQue
     clearTimeout(t);
   }
 }
+// ===== D. 映射 dataquery steps 为进度条（聊天气泡用） =====
+function mapDQStepsToProgress(dqSteps?: any[]): Step[] {
+  const rows: Step[] = (Array.isArray(dqSteps) ? dqSteps : []).map((s: any) => {
+    const raw = String(s.status ?? s.ok ?? "").toLowerCase();
+    const status: Step["status"] =
+      /error/.test(raw) ? "error" :
+      /(done|ok|finish|success|true)/.test(raw) ? "done" :
+      /(start|doing|progress|running)/.test(raw) ? "doing" : "done";
+    const label = s.title || s.stage || s.step || "步骤";
+    return { label: String(label), status };
+  });
+
+  return rows.filter(s => !shouldHideProgress(s.label));
+
+}
+
 
 function DebugChecks({ resp }: { resp?: any }) {
   if (!resp || !resp.debug) return null;
@@ -322,7 +398,25 @@ const ProgressBubble: React.FC<{
   collapsed?: boolean;
   onToggle?: () => void;
 }> = ({ steps, raw, showRaw = false, collapsed, onToggle }) => {
-  const allDone = steps.every(s => s.status === "done" || s.status === "error");
+  // 没收到任何步骤时，不要显示“已完成”
+  const allDone = steps.length > 0 && steps.every(s => s.status === "done" || s.status === "error");
+  // === 分组与门禁 ===
+  const GROUP_ORDER = ["意图","编排","执行","政策","合并","总结"]; // 你已有的 group 值里用到哪些就列哪些
+  const seqOf = (s: Step) => (typeof s.seq === "number" ? s.seq : Number.MAX_SAFE_INTEGER);
+  const doneLike = (s: Step) => (s.status === "done" || s.status === "error");
+
+  // 先把同组的步骤按 seq 排序
+  const groups = GROUP_ORDER
+    .map(g => ({
+      group: g,
+      items: steps.filter(s => (s.group || "") === g).sort((a,b) => seqOf(a) - seqOf(b)),
+    }))
+    .filter(b => b.items.length > 0);
+
+  // 第一个“未全部完成”的组（门禁：只显示它之前的所有组 + 它本身）
+  const firstOpenIdx = groups.findIndex(b => !b.items.every(doneLike));
+  const visibleGroups = groups.slice(0, (firstOpenIdx === -1 ? groups.length - 1 : firstOpenIdx) + 1);
+
   if (collapsed) {
     return (
       <div className="text-sm">
@@ -338,23 +432,36 @@ const ProgressBubble: React.FC<{
         <div className="text-xs font-medium text-gray-700">执行进度</div>
         <button onClick={onToggle} className="text-xs text-gray-500 hover:text-gray-700">折叠</button>
       </div>
-      <ol className="space-y-1 mt-1">
-        {steps.map((s, i) => (
-          <li key={i} className="text-sm">
+{/* 分组 + 缩进（只显示到“第一个未完成组”为止） */}
+<ol className="space-y-2 mt-1">
+  {visibleGroups.map((b, gi) => (
+    <li key={gi}>
+      {/* 组头 */}
+      <div className="text-xs font-semibold text-gray-700">{b.group}</div>
+      {/* 组内条目（一级缩进）；“思考·”再做二级缩进与淡色 */}
+      <ol className="mt-1 space-y-1">
+        {b.items.map((s, i) => (
+          <li key={i} className="text-sm pl-4">
             <span className="inline-flex items-center gap-2">
               {s.status === "pending" && <span className="w-2 h-2 rounded-full bg-gray-300" />}
               {s.status === "doing"   && <RefreshCw className="w-3 h-3 animate-spin text-blue-500" />}
               {s.status === "done"    && <Check className="w-3 h-3 text-green-600" />}
               {s.status === "error"   && <AlertTriangle className="w-3 h-3 text-red-600" />}
-              <span className="font-medium">{s.label}</span>
+              <span className={`font-medium ${/^思考·/.test(s.label) ? "text-gray-600" : ""}`}>{s.label}</span>
               <span className="text-xs text-gray-500">({s.status})</span>
             </span>
             {s.detail && (
-              <div className="ml-5 mt-1 text-xs text-gray-600 whitespace-pre-wrap">{s.detail}</div>
+              <div className={`mt-1 text-xs text-gray-600 whitespace-pre-wrap ${/^思考·/.test(s.label) ? "ml-6" : "ml-4"}`}>
+                {s.detail}
+              </div>
             )}
           </li>
         ))}
       </ol>
+    </li>
+  ))}
+</ol>
+
 
       {/* 原始日志仅在显式允许时显示 */}
   {showRaw && Array.isArray(raw) && raw.length > 0 && (
@@ -376,16 +483,19 @@ async function runDeepAnalysis(payload: any, ctrl?: AbortController) {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${(import.meta as any).env?.VITE_ROE_AGENT_TOKEN || ""}`
+      ...buildAuthHeader(),          // ← 只有存在 token 才会带 Authorization
     },
     body: JSON.stringify(payload),
     mode: "cors",
     credentials: "omit",
-    signal: ctrl?.signal,   // ✅ 支持中止
+    signal: ctrl?.signal,
   });
   if (!res.ok) throw new Error(await res.text());
   return await res.json();
 }
+
+
+
 
 // === 新增：流式（SSE）调用 deep analysis，直到收到 done 才 resolve ===
 async function runDeepAnalysisStream(
@@ -394,14 +504,15 @@ async function runDeepAnalysisStream(
   onProgress: (ev: any) => void
 ): Promise<any> {
   const res = await fetch(`${DEEP_API}/deepanalysis/analyze/stream`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${(import.meta as any).env?.VITE_ROE_AGENT_TOKEN || ""}`
-    },
-    body: JSON.stringify(payload),
-    signal: ctrl.signal,
-  });
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    ...buildAuthHeader(),            // ← 统一
+  },
+  body: JSON.stringify(payload),
+  signal: ctrl.signal,
+});
+
 
   // 某些代理不支持 SSE；回退到非流式
   const ctype = res.headers.get("content-type") || "";
@@ -449,6 +560,64 @@ async function runDeepAnalysisStream(
   });
 }
 
+// === 新增：流式（SSE）调用 intent 路由，直到收到 done 才 resolve ===
+async function routeIntentStream(
+  payload: any,
+  ctrl: AbortController,
+  onProgress: (ev: any) => void
+): Promise<any> {
+  const res = await fetch(`${INTENT_API}/intent/route/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...buildAuthHeader(),              // ← 统一
+    },
+    body: JSON.stringify(payload),
+    signal: ctrl.signal,
+  });
+
+  const ctype = res.headers.get("content-type") || "";
+  if (!res.ok || !ctype.includes("text/event-stream") || !res.body) {
+    throw new Error("no-stream");
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  return new Promise(async (resolve, reject) => {
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let idx;
+        while ((idx = buffer.indexOf("\n\n")) >= 0) {
+          const raw = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+
+          let evt = "message";
+          let data = "";
+          for (const line of raw.split("\n")) {
+            if (line.startsWith("event:")) evt = line.slice(6).trim();
+            else if (line.startsWith("data:")) data += line.slice(5).trim();
+          }
+
+          if (evt === "progress") {
+            try { onProgress(JSON.parse(data)); } catch {}
+          } else if (evt === "done") {
+            try { resolve(JSON.parse(data)); } catch { resolve({}); }
+            return;
+          }
+        }
+      }
+      resolve({});
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
 
 async function routeIntent(payload: any) {
   const res = await fetch(`${INTENT_API}/intent/route`, {
@@ -462,6 +631,93 @@ async function routeIntent(payload: any) {
   if (!res.ok) throw new Error(await res.text());
   return await res.json();
 }
+
+// === 动态进度：把一条 SSE 事件写进“进度气泡”的行列表（按 step 文本去重/更新） ===
+type Step = {
+  label: string;
+  status: "pending" | "doing" | "done" | "error";
+  detail?: string;
+  /** 单调递增序号，来自后端 SSE，用于严格排序 */
+  seq?: number;
+  /** 可选分组：意图/抽取/编排/执行/合并 */
+  group?: string;
+};
+
+const statusFrom = (raw: any): Step["status"] => {
+  const s = String(raw || "").toLowerCase();
+  if (/error/.test(s)) return "error";
+  if (/(done|ok|finish|success|end)/.test(s)) return "done";
+  return "doing";
+};
+const HIDDEN_PROGRESS_MATCHERS = [
+  (s: string) => /^llm[_\s-]?first$/i.test(s.trim()),
+  (s: string) => /调用分析agent大模型中/i.test(s),
+  (s: string) => /生成报告中/i.test(s),
+];
+
+
+const shouldHideProgress = (label?: string) =>
+  !label ? false : HIDDEN_PROGRESS_MATCHERS.some(fn => fn(String(label)));
+/** 把 {step,status,detail} 写进当前这轮问答的“进度气泡”里（新增或更新同名行） */
+const upsertProgressRow = (
+  progressMsgIndexRef: React.MutableRefObject<number | null>,
+  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>,
+  ev: any
+) => {
+  const label = String(ev?.step || "正在处理…").trim();
+  if (shouldHideProgress(label)) return;
+  const status: Step["status"] = statusFrom(ev?.status);
+  if (status === "pending") return; // 不展示 pending
+
+  const row: Step = {
+    label,
+    status,
+    detail: ev?.detail,
+    seq: typeof ev?.seq === "number" ? ev.seq : undefined,
+    group: ev?.group,
+  };
+
+  if (progressMsgIndexRef.current === null) return;
+  setMessages((m) => {
+    const arr = [...m];
+    const idx = progressMsgIndexRef.current!;
+    const msg = arr[idx];
+    if (!msg) return arr;
+
+    const list = Array.isArray(msg.progress) ? [...msg.progress] : [];
+    const i = list.findIndex(s => s.label === row.label);
+    if (i >= 0) {
+      list[i] = { ...list[i], status: row.status, detail: row.detail ?? list[i].detail, seq: row.seq ?? list[i].seq, group: row.group ?? list[i].group };
+    } else {
+      list.push(row);
+    }
+
+    // 去重（“思考·…”只保留最后一次）
+    const seen = new Set<string>();
+    const cleaned = list
+      .reverse()
+      .filter(s => {
+        const key = s.label.startsWith("思考·") ? "思考" : s.label;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .reverse();
+
+    // ★ 加入严格时序排序（有 seq 用 seq，没 seq 放最后）
+    const sorted = cleaned.slice().sort((a, b) => {
+      const A = typeof a.seq === "number" ? a.seq : Number.MAX_SAFE_INTEGER;
+      const B = typeof b.seq === "number" ? b.seq : Number.MAX_SAFE_INTEGER;
+      return A - B;
+    });
+
+    arr[idx] = { ...msg, progress: sorted };
+    return arr;
+  });
+};
+
+
+
 
 /* =================== Helpers =================== */
 /* 数字格式化：|x|>10000 → 千分位整数；|x|<1 → 4 位小数；否则 2 位小数 */
@@ -585,8 +841,7 @@ function deepSectionsToMarkdown(sections?: Array<Record<string, any>>): string {
     if (s.formula?.compute_cn || s.formula?.compute) {
       const varsCN = (s.formula.variables_cn || s.formula.variables || []).join("，");
       if (s.formula.compute_cn) md += `\n**公式（中文）**：\`${s.formula.compute_cn}\`\n`;
-      if (s.formula.compute)    md += `**公式（计算键）**：\`${s.formula.compute}\`\n`;
-      if (varsCN) md += `**变量**：${varsCN}\n`;
+
     }
     if (s.contribution_yoy?.length) {
       md += `\n**同比贡献估算**\n`;
@@ -638,7 +893,8 @@ const ChatIndicatorCard: React.FC<{ data: NonNullable<DataQueryResp['indicator_c
   const progress = tgt && curr !== null ? (curr / tgt) * 100 : null; // 目标达成度
 
   return (
-    <div className="w-[420px] max-w-full rounded-xl border border-gray-200 bg-white shadow-sm p-5">
+      <div className="w-full min-w-[360px] max-w-none rounded-xl border border-gray-200 p-4 shadow-sm bg-white">
+
       {/* 标题（不显示分类） */}
       <div className="text-gray-900 text-lg font-semibold">{data.metric}</div>
       {/* 副标题：公司 + 期间 */}
@@ -927,6 +1183,7 @@ const UploadFormulaModal: React.FC<{
   const [computeCN, setComputeCN] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [isStandard, setIsStandard] = useState(true);
+  const [methodName, setMethodName] = useState("");
 
   const [missingOpen, setMissingOpen] = useState(false);
   const [missingNames, setMissingNames] = useState<string[]>([]);
@@ -990,12 +1247,14 @@ const UploadFormulaModal: React.FC<{
       const compute = { [metricKey]: expr };
 
       const { error } = await supabase.from("metric_formulas").insert([{
-        metric_name: metricKey,
+        metric_name: metricName.trim(),
         description: description || null,
         variables,
         compute,
         enabled,
         is_standard: isStandard,
+        method_name: isStandard ? null : methodName.trim(),
+        
         method: "ratio",
         version: 1
       }]);
@@ -1013,7 +1272,9 @@ const UploadFormulaModal: React.FC<{
   const onSubmit = async () => {
     try {
       if (!metricName.trim()) return toast.error("请填写指标名（中文，如：总资产周转率）");
-
+      if (!isStandard && !methodName.trim()) {
+      return toast.error("请填写“公式名称”（method_name），例如：杜邦分析法");
+      }
       const { cn2key, keyOfMetric } = await fetchAliasMap();
 
       const rawVars = variablesCN.split(/[,，、\s]+/).map(s => s.trim()).filter(Boolean);
@@ -1111,6 +1372,21 @@ const UploadFormulaModal: React.FC<{
                 设为<span className="text-purple-700 font-medium">标准公式</span>
               </label>
             </div>
+             {/* 当“未勾选标准公式”时，显示公式名称（method_name） */}
+            {!isStandard && (
+              <div className="col-span-2">
+                <label className="block text-sm text-gray-600 mb-1">
+                  公式名称 method_name（必填）
+                </label>
+                <input
+                  value={methodName}
+                  onChange={(e) => setMethodName(e.target.value)}
+                  placeholder="例：杜邦分析法"
+                  className="w-full rounded-lg border-gray-300 focus:ring-purple-500 focus:border-purple-500 placeholder-gray-400"
+                />
+
+              </div>
+            )}
           </div>
 
           <div className="mt-6 flex justify-end gap-3">
@@ -1624,74 +1900,22 @@ const FinancialAnalysis: React.FC = () => {
   const [showSteps, setShowSteps] = useState<boolean>(false); // [ADD]
   const [backendProgress, setBackendProgress] = useState<any[] | null>(null); // [ADD]
   useEffect(() => {
-  if (!backendProgress || !Array.isArray(backendProgress)) return;
-
-  // 把后端进度合并到 steps
-  let nextStepsSnapshot: Step[] | null = null;
-  setSteps(prev => {
-    const next = [...prev];
-
-    const mapIdx = (txt: string) => {
-      const s = (txt || "").toString();
-      if (s.includes("意图") || s.includes("分析问题")) return 0;
-      if (s.includes("取数")) return 1;
-      if (s.includes("下钻") || s.includes("调用分析agent")) return 2;
-      if (s.includes("最终") || s.includes("生成结果")) return 3;
-      return -1;
-    };
-
-    for (const p of backendProgress) {
-      const i = mapIdx(String(p.step || ""));
-      if (i < 0) continue;
-      const stRaw = String(p.status || "").toLowerCase();
-      const status: Step["status"] =
-        /error/.test(stRaw) ? "error" :
-        /(done|ok|finish)/.test(stRaw) ? "done" :
-        /(start|doing|progress)/.test(stRaw) ? "doing" :
-        next[i].status;
-
-      // 关键：把“业务可读的文字说明”写进 detail
-      next[i] = { ...next[i], status, detail: (p.detail ?? next[i].detail) };
+  if (!backendProgress || progressMsgIndexRef.current === null) return;
+  // 仅把原始日志挂到当前进度气泡的 progressRaw（不改 progress 行）
+  setMessages((m) => {
+    const arr = [...m];
+    const idx = progressMsgIndexRef.current!;
+    const msg = arr[idx];
+    if (msg) {
+      arr[idx] = { ...msg, progressRaw: backendProgress };
     }
-    nextStepsSnapshot = next;        // 暂存一份，下面同步到聊天消息
-    return next;
+    return arr;
   });
-
-  // 同步到对话里的“进度气泡”：progress（而不仅仅是原始日志）
-  if (progressMsgIndexRef.current !== null) {
-    setMessages((m) => {
-      const arr = [...m];
-      const idx = progressMsgIndexRef.current!;
-      const msg = arr[idx];
-      if (msg) {
-        arr[idx] = {
-          ...msg,
-          progress: nextStepsSnapshot || msg.progress, // ← 同步步骤与详细文字
-          progressRaw: backendProgress                  // 原始日志仍可留存但不会显示
-        };
-      }
-      return arr;
-    });
-  }
 }, [backendProgress]);
 
 
-  useEffect(() => {
-  if (progressMsgIndexRef.current === null) return;
-  // 自动折叠：全部 done/error 后 1.2s 折叠
-  const doneAll = steps.every(s => s.status === "done" || s.status === "error");
-  if (doneAll) {
-    const t = setTimeout(() => {
-      setMessages((m) => {
-        const arr = [...m];
-        const idx = progressMsgIndexRef.current!;
-        if (arr[idx]) arr[idx] = { ...arr[idx], collapsed: true };
-        return arr;
-      });
-    }, 1200);
-    return () => clearTimeout(t);
-  }
-}, [steps]);
+
+
 
   /** 强制顺序：当把第 idx 步设为 doing/done 时，自动把 0..idx-1 补成 done，避免乱序 */
   const setStepStatus = (idx: number, status: Step["status"], detail?: string) => {
@@ -1706,15 +1930,6 @@ const FinancialAnalysis: React.FC = () => {
       // 再更新当前步骤
       if (next[idx]) next[idx] = { ...next[idx], status, ...(detail ? { detail } : {}) };
 
-      // 同步到对话中的“进度气泡”
-      if (progressMsgIndexRef.current !== null) {
-        setMessages(m => {
-          const arr = [...m];
-          const i = progressMsgIndexRef.current!;
-          if (arr[i]) arr[i] = { ...arr[i], progress: next };
-          return arr;
-        });
-      }
       return next;
     });
   };
@@ -1802,7 +2017,6 @@ const FinancialAnalysis: React.FC = () => {
     }
     welcome += '- "2024 Q2 XX港口公司的营业收入是多少？"\n';
     welcome += '- "分析 XX集团公司 2024 Q2 的 ROE"\n';
-    welcome += '- "2024 年 Q4 XX地产公司的ROA是多少？"\n\n';
     setMessages([{ role: "assistant", content: welcome, timestamp: new Date().toISOString() }]);
   };
 
@@ -1877,328 +2091,200 @@ const FinancialAnalysis: React.FC = () => {
     setSelectedTabs(next);
   };
 
-  const handleSendMessage = async (query?: string) => {
-    const messageText = query || inputQuery.trim();
-    if (selectedTabs.has("business") && !selectedBizFormula) {
-      toast.error("请选择一条“业务公式”再开始分析下钻");
-      setLoading(false);
-      return;
-    }
-    if (!messageText) return toast.error("请输入问题");
+const handleSendMessage = async (query?: string) => {
+  const messageText = query || inputQuery.trim();
+  if (selectedTabs.has("business") && !selectedBizFormula) {
+    toast.error("请选择一条“业务公式”再开始分析下钻");
+    setLoading(false);
+    return;
+  }
+  if (!messageText) return toast.error("请输入问题");
 
-    setMessages((m) => [...m, { role: "user", content: messageText, timestamp: new Date().toISOString() }]);
-    setInputQuery("");
-    setLoading(true);
+  // 用户消息
+  setMessages((m) => [...m, { role: "user", content: messageText, timestamp: new Date().toISOString() }]);
+  setInputQuery("");
+  setLoading(true);
 
-    // ✅ 在对话里插入一个“进度气泡”消息（初始第0步 doing）
-    const initStepsInChat: Step[] = stepsForIntent().map(
-      (s, i): Step => ({ ...s, status: i === 0 ? "doing" : "pending" })
-    );
-
-    progressMsgIndexRef.current = (messages.length + 1); // 用户消息已经 push 1 条
-    const progressMsg: ChatMessage = {
-      role: "assistant",
-      content: "",
-      timestamp: new Date().toISOString(),
-      progress: initStepsInChat,
-      collapsed: false,
-    };
-    setMessages((m): ChatMessage[] => [...m, progressMsg]);
-
-    // ---------- 重置与开启步骤面板 ----------
-    setShowSteps(false);                 // 展示步骤区域
-    setSteps(stepsForIntent());          // 全部重置为 pending（按意图模板）
-    setBackendProgress(null);            // 清空后端进度
-    setStepStatus(0, "doing");           // Step0：意图识别 → doing
-
-    const ctrl = new AbortController();
-    abortRef.current = ctrl;
-
-    try {
-      // ===== 1) 意图识别与路由 =====
-      const modes = Array.from(selectedTabs) as ("dimension" | "metric" | "business" | "anomaly")[];
-      const intentReq = {
-        question: messageText,
-        ui_tab: forcedPolicy ? "policy" : (modes.length ? "analysis" : undefined),
-        force_deep: modes.length > 0,
-        selected_modes: (forcedPolicy ? [...modes, "policy"] : modes) as any,
-        business_formula_metric_name: selectedTabs.has("business") ? (selectedBizFormula || undefined) : undefined,
-        auto_execute: modes.length === 0, // [MOD] 确保不由后端立即执行，前端可控进度
-      };
-
-      const routed = await routeIntent(intentReq);
-      setStepStatus(0, "done"); // 意图识别完成
-
-      const rr = routed?.routed_response ?? {};
-      const r = (rr && rr.data) ? rr.data : rr;  // 兼容 { data: {...} } 包装
-      const intent = routed?.intent as string;
-
-      // ① 根据意图切换步骤模板（dataquery/政策 → 两步；deep → 四步）
-      const tpl = stepsForIntent(intent);
-      setSteps(tpl);
-      if (progressMsgIndexRef.current !== null) {
-        setMessages(m => {
-          const arr = [...m];
-          const idx = progressMsgIndexRef.current!;
-          if (arr[idx]) arr[idx] = { ...arr[idx], progress: tpl };
-          return arr;
-        });
-      }
-
-      // ② 先把“意图识别”标记完成，再进行后续（避免你看到“取数先 done、意图还在 doing”）
-      setStepStatus(0, "done", `intent=${intent || "N/A"}`);
-
-
-    // === 新增：在对话里打印“意图识别结果”调试信息 ===
-      try {
-        const debugLines = [
-          `intent: ${intent || "(empty)"}`,
-          `auto_execute: ${String(intentReq.auto_execute)}`,
-          `ui_tab: ${intentReq.ui_tab || "(none)"}`,
-          `force_deep: ${String(intentReq.force_deep)}`,
-          `selected_modes: ${JSON.stringify(intentReq.selected_modes || [])}`,
-          `business_formula_metric_name: ${String(
-            intentReq.business_formula_metric_name || ""
-          )}`,
-          `has_routed_payload: ${String(!!routed?.routed_payload)}`,
-          `routed_response_keys: ${JSON.stringify(Object.keys(r || {}))}`,
-          `has_indicator_card: ${String(!!(r as any)?.indicator_card)}`,
-          `need_clarification: ${String(!!(r as any)?.need_clarification)}`,
-          `ask: ${((r as any)?.ask || "")}`,
-          `has_analysis_text: ${String(!!(r as any)?.analysis)}`,
-        ];
-        const rawPreview = (() => {
-          try {
-            return JSON.stringify(r || {}, null, 2).slice(0, 1200);
-          } catch {
-            return "[unserializable routed_response]";
-          }
-        })();
-
-        
-      } catch {
-        // 打印失败不应影响后续逻辑
-      }
-
-      // 非 deep：关闭步骤条（仅 deep 需要详细阶段） // [ADD]
-      if (intent !== "deep") setShowSteps(false);
-      
-
-      // A) indicator_card 直接展示
-      const indicatorCard = r?.indicator_card ?? r?.indicator_card?.data;
-if (indicatorCard) {
-  const cardMsg: ChatMessage = {
+  // 新增一条“进度气泡”
+  const progressMsg: ChatMessage = {
     role: "assistant",
     content: "",
-    indicatorCard,
     timestamp: new Date().toISOString(),
+    progress: [],
+    collapsed: false,
   };
-  setMessages((m): ChatMessage[] => [...m, cardMsg]);
+  setMessages((m): ChatMessage[] => {
+    progressMsgIndexRef.current = m.length;
+    return [...m, progressMsg];
+  });
 
-  /** [ADD] dataquery 的 3-Check 调试消息（如果后端带了 debug/steps） */
-  if (intent === "dataquery") {
-    const hasDebug = r && (r.debug || r.steps || r.value || r.formula || r.message);
-      if (hasDebug) {
-        const dbgMsg: ChatMessage = {
+  // ---------- 统一走 intent/route/stream ----------
+  abortRef.current = new AbortController();
+  const ctrl = abortRef.current!;
+
+  // 进度事件 → 写入当前这条“进度气泡”
+  const onProgress = (ev: any) => {
+    try { upsertProgressRow(progressMsgIndexRef, setMessages, ev); } catch {}
+  };
+
+  try {
+    const selectedModes = Array.from(selectedTabs);
+    const force_deep = selectedModes.length > 0; // 选了任一“下钻”Tab，则强制 deep
+    // 最近 N 轮（用户+助手混合，简单取末尾 2N 条）
+    const ctxTurns = messages.slice(-DIALOG_CTX_ROUNDS * 2).map(m => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    const payload = {
+      question: messageText,
+      ui_tab: force_deep ? "analysis" : undefined,
+      selected_modes: force_deep ? selectedModes : undefined,
+      force_deep,
+      dialog_context: { turns: ctxTurns, max_rounds: DIALOG_CTX_ROUNDS },
+    };
+
+
+    const finalMerged = await routeIntentStream(payload, ctrl, onProgress);
+
+    // 收尾当前进度气泡
+    setMessages(m => {
+      const arr = [...m];
+      const idx = progressMsgIndexRef.current!;
+      const prog = arr[idx];
+      if (prog?.progress?.length) {
+        const fixed = prog.progress.map((s:any)=> s.status==="doing"?{...s,status:"done"}:s);
+        arr[idx] = { ...prog, progress: fixed };
+      }
+      return arr;
+    });
+
+    // ① 澄清/非财务提示：need_clarification 或 message 时优先提示并结束本轮
+    if (finalMerged?.need_clarification && finalMerged?.ask) {
+      setMessages(m => [...m, {
+        role: "assistant",
+        content: finalMerged.ask,
+        timestamp: new Date().toISOString(),
+      }]);
+      return;
+    }
+    if (finalMerged?.message && !finalMerged?.sections && !finalMerged?.cards) {
+      const sugs = Array.isArray(finalMerged?.suggested_questions)
+        ? (finalMerged.suggested_questions as string[]).slice(0, 8)
+        : undefined;
+      setMessages(m => [...m, {
+        role: "assistant",
+        content: finalMerged.message,
+        timestamp: new Date().toISOString(),
+        suggestions: sugs,
+      }]);
+      return;
+    }
+
+    // 合并为一条主体 + 若干张指标卡
+    const sectionsMd = deepSectionsToMarkdown(finalMerged?.sections || []);
+    const cards = finalMerged?.cards || [];
+    const summary = finalMerged?.summary || "";
+
+    // 加强“综合结论”可视化：用高亮卡片包裹（Markdown_2 支持 HTML 时可生效）
+    const summaryBlock = summary
+      ? `
+
+<div class="rounded-lg border border-amber-200 bg-amber-50 p-4 my-4">
+  <div class="font-semibold text-amber-700">综合结论</div>
+  <div class="mt-1 text-amber-800">${String(summary).replace(/\n/g, "<br/>")}</div>
+</div>
+`
+      : "";
+
+    const content = [sectionsMd, summaryBlock].join("\n").trim();
+
+    // 先出“指标卡（合并为一个框）”
+    // 先判断是否属于“同一指标 + 多期/多公司”的对比场景；是则用图表替代指标卡
+    if (Array.isArray(cards) && cards.length) {
+      // 归一化工具
+      const toNum = (v: any) => {
+        if (v === null || v === undefined || v === "") return null;
+        const s = String(v).replace(/[,%％\s]/g, "");
+        const n = Number(s);
+        return Number.isFinite(n) ? n : null;
+      };
+      const metricSet = new Set(cards.map(c => String(c?.metric ?? "").trim()));
+      const timeSet   = new Set(cards.map(c => String(c?.time   ?? "").trim()).filter(Boolean));
+      const compSet   = new Set(cards.map(c => String(c?.company?? "").trim()).filter(Boolean));
+
+      const isOneMetric     = metricSet.size === 1;
+      const isCrossPeriod   = isOneMetric && timeSet.size > 1;
+      const isCrossCompany  = isOneMetric && compSet.size > 1 && timeSet.size <= 1;
+
+      if ((isCrossPeriod || isCrossCompany) && cards.length >= 2) {
+        const data = (isCrossPeriod
+          ? cards
+              .slice()
+              .sort((a, b) => String(a.time).localeCompare(String(b.time)))
+              .map(c => ({ name: String(c.time ?? ""),  value: toNum(c.current) }))
+          : cards.map(c => ({ name: String(c.company ?? ""), value: toNum(c.current) }))
+        ).filter(d => d.value !== null);
+
+                // 将图表类型显式限定为联合类型，避免被推成普通 string
+        const chartType: "line" | "bar" = isCrossPeriod ? "line" : "bar";
+
+        const metricName = [...metricSet][0] || "";
+        const title = isCrossPeriod
+          ? `${metricName} — 趋势对比`
+          : `${metricName} — 公司对比`;
+
+        const chartMsg: ChatMessage = {
           role: "assistant",
           content: "",
-          debug: r,                            // 传整个 dataquery 响应，DebugChecks 会用到 resp.debug/resp.message/resp.value 等
           timestamp: new Date().toISOString(),
+          chart: {
+            type: isCrossPeriod ? "line" : "bar",
+            data,
+            xKey: "name",
+            yKey: "value",
+            nameKey: "name",
+            title,
+          },
         };
-        setMessages((m): ChatMessage[] => [...m, dbgMsg]);
-      }
-      toast.success("完成");
-      return;
-    }
-  }
-
-      // A) indicator_card 直接展示（保持你现有逻辑）
-
-      // B) dataquery 澄清
-      if (r?.need_clarification && r?.ask) {
-      setMessages((m) => [
-        ...m,
-        { role: "assistant", content: r.ask, timestamp: new Date().toISOString() },
-        /** [ADD] 在澄清时也显示调试条（可看到 need_llm=true / llm解析失败 等） */
-        r?.debug || r?.steps ? { role: "assistant", content: "", debug: r, timestamp: new Date().toISOString() } : undefined,
-      ].filter(Boolean) as ChatMessage[]);
-      toast.success("请补充信息后重试");
-      return;
-    }
 
 
-      // C) deepanalysis：优先使用后端已执行的结果
-      if (intent === "deep") {
-      const routedPayload = routed?.routed_payload;
-      const routedResponse = routed?.routed_response;
-      let deepResp: any = routedResponse ?? null;
+        setMessages((m): ChatMessage[] => [...m, chartMsg]);
 
-      // 先把 “取数中” 标记为进行中
-      setStepStatus(1, "doing");
-
-      // 一个小工具：把后端 progress 映射到 UI 的四步
-      const mapIdx = (txt: string) => {
-        const s = (txt || "").toString();
-        if (s.includes("意图") || s.includes("分析问题")) return 0;
-        if (s.includes("取数")) return 1;
-        if (s.includes("下钻") || s.includes("调用分析agent")) return 2;
-        if (s.includes("最终") || s.includes("生成结果")) return 3;
-        return -1;
-      };
-
-      if (!deepResp) {
-        try {
-          if (!routedPayload) throw new Error("缺少 routed_payload，无法发起分析调用");
-
-          // 优先尝试流式
-          const resp = await runDeepAnalysisStream(
-            routedPayload,
-            ctrl,
-            (ev) => {
-              // 1) 记录后端进度（用于展开“原始日志”）
-              setBackendProgress((prev) => [...(prev || []), ev]);
-
-              // 2) 同步四步状态+文案
-              const i = mapIdx(String(ev.step || ""));
-              if (i >= 0) {
-                const stRaw = String(ev.status || "").toLowerCase();
-                const status: Step["status"] =
-                  /error/.test(stRaw) ? "error" :
-                  /(done|ok|finish)/.test(stRaw) ? "done" :
-                  /(start|doing|progress)/.test(stRaw) ? "doing" :
-                  undefined as any;
-
-                if (status) setStepStatus(i, status, ev.detail);
-              }
-            }
-          );
-
-          // 流式完成后拿到最终结果
-          deepResp = resp && resp.indicator_card ? resp : (resp || null);
-        } catch (e) {
-          // 流式不可用（如网关不支持 SSE）→ 回退非流式
-          try {
-            deepResp = await runDeepAnalysis(routedPayload, ctrl);
-          } catch (err: any) {
-            const msg = err?.message || "";
-            const hint = msg.includes("Failed to fetch")
-              ? `无法访问分析服务：${DEEP_API}/deepanalysis/analyze。请检查 VITE_DEEP_AGENT_URL 与网络。`
-              : "";
-            setStepStatus(2, "error", (msg || "调用分析服务失败") + (hint ? `\n${hint}` : ""));
-            throw err;
-          }
-        }
-      }
-
-      // “取数中”完成、“调用分析agent”进行中
-      setStepStatus(1, "done");
-      setStepStatus(2, "doing");
-
-      // 如果后端已自带 progress（非流式回退时），也合并一下
-      if (deepResp?.progress && Array.isArray(deepResp.progress)) {
-        setBackendProgress(deepResp.progress as any[]);
-        // 同步一步到位
-        deepResp.progress.forEach((p: any) => {
-          const i = mapIdx(String(p.step || ""));
-          if (i >= 0) {
-            const stRaw = String(p.status || "").toLowerCase();
-            const status: Step["status"] =
-              /error/.test(stRaw) ? "error" :
-              /(done|ok|finish)/.test(stRaw) ? "done" :
-              /(start|doing|progress)/.test(stRaw) ? "doing" :
-              undefined as any;
-            if (status) setStepStatus(i, status, p.detail);
-          }
-        });
-      }
-
-      // 进入“生成结果中”
-      setStepStatus(2, "done");
-      setStepStatus(3, "doing");
-
-      // === 渲染结果（保持你原有逻辑） ===
-      let md = "## 🔎 分析下钻结果\n";
-      if (deepResp?.resolved) {
-        const { company, metric, year, quarter } = deepResp.resolved;
-        if (company || metric || year || quarter) {
-          md += `\n**对象**：${company ?? "-"} · ${year ?? "-"} ${quarter ?? "-"} · ${metric ?? "-"}\n`;
-        }
-      }
-      if (deepResp?.summary) md += `\n> ${deepResp.summary}\n`;
-      if (deepResp?.analysis_text) {
-        md += `\n<details><summary>模型思考摘要（调试）</summary>\n\n${deepResp.analysis_text}\n\n</details>\n`;
-      }
-      if (deepResp?.debug) {
-        md += `\n<details><summary>调试信息</summary>\n\n\`\`\`json\n${JSON.stringify(deepResp.debug, null, 2)}\n\`\`\`\n</details>\n`;
-      }
-
-      const secMd = deepSectionsToMarkdown(deepResp?.sections || []);
-      if (secMd) {
-        md += `\n${secMd}\n`;
-      } else if (!deepResp?.summary) {
-        md += "\n（已完成下钻，但没有可展示的分项；请检查是否缺少子公司关系或指标的标准/业务公式配置。）\n";
-      }
-
-      const charts = (deepResp?.sections || [])
-        .filter((s: any) => s?.chart && s.chart.type && s.chart.data)
-        .map((s: any) => s.chart);
-      const mainChart = charts.find((c: any) => c?.type === "pie") || charts[0] || null;
-
-      setMessages((prev): ChatMessage[] => {
-        const first: ChatMessage = {
-          role: "assistant",
-          content: md,
-          chart: (mainChart || undefined) as any,
-          timestamp: new Date().toISOString(),
-        };
-        const rest: ChatMessage[] = (charts.length > 1)
-          ? charts.slice(1).map((cfg: any): ChatMessage => ({
-              role: "assistant",
-              content: "",
-              chart: cfg,
-              timestamp: new Date().toISOString(),
-            }))
-          : [];
-        return [...prev, first, ...rest];
-      });
-
-      setStepStatus(3, "done");
-      toast.success("完成");
-      return;
-    }
-
-
-      // D) policy：展示文本
-      if (intent === "policy" && r?.analysis) {
-        setMessages((m) => [...m, { role: "assistant", content: r.analysis, timestamp: new Date().toISOString() }]);
-        toast.success("完成");
-        return;
-      }
-
-      // E) other 或无匹配
-      if (intent === "other" || !intent) {
-        const msg = r?.message || "这似乎不是财务问题。请尝试明确公司、指标、年份、季度。";
-        setMessages((m) => [...m, { role: "assistant", content: msg, timestamp: new Date().toISOString() }]);
-        toast.success("完成");
-        return;
-      }
-
-      // F) 兜底
-      throw new Error("未识别的意图或空响应");
-    } catch (e: any) {
-      const msg = e?.message || "";
-      if (/abort/i.test(msg) || e?.name === "AbortError") {
-        // 用户主动终止
       } else {
-        setMessages((m) => [...m, { role: "assistant", content: `出错：${msg || "未知错误"}`, timestamp: new Date().toISOString() }]);
-        toast.error("失败");
-        setStepStatus(3, "error", msg || "错误");
+        // 非对比场景——仍然输出指标卡
+        setMessages(m => [...m, {
+          role: "assistant",
+          content: "",
+          timestamp: new Date().toISOString(),
+          indicatorCards: cards
+        }]);
       }
-    } finally {
-      setLoading(false);
-      abortRef.current = null;
     }
-  };
+
+    // 再出“主体（分析框）”
+    const sugs = Array.isArray(finalMerged?.suggested_questions)
+      ? (finalMerged.suggested_questions as string[]).slice(0, 8)
+      : undefined;
+    setMessages(m => [...m, {
+      role: "assistant",
+      content,
+      timestamp: new Date().toISOString(),
+      indicatorCards: undefined,
+      suggestions: sugs,
+    }]);
+
+
+
+  } catch (e:any) {
+    toast.error(e?.message || "请求失败");
+    upsertProgressRow(progressMsgIndexRef, setMessages, { step: "生成结果中", status: "error", detail: e?.message || "请求失败" });
+  } finally {
+    abortRef.current = null;
+    setLoading(false);
+  }
+};
+
 
   // 文件上传（保持原逻辑）
   const readFileContent = (file: File): Promise<string> =>
@@ -2390,34 +2476,42 @@ if (indicatorCard) {
 
                 {/* 内容 */}
                 {m.role === "user" ? (
-                <p className="whitespace-pre-wrap">{m.content}</p>
-              ) : m.indicatorCard ? (
-                <ChatIndicatorCard data={m.indicatorCard} />
-              ) : m.progress ? (  // ✅ 新增：进度气泡
+                  <p className="whitespace-pre-wrap">{m.content}</p>
+                ) : Array.isArray(m.indicatorCards) && m.indicatorCards.length > 0 ? (
+                // ✅ 多张指标卡合并到同一个“消息框”里（响应式网格排列）
+                <div className="grid [grid-template-columns:repeat(auto-fit,minmax(360px,1fr))] gap-4">
+                  {m.indicatorCards.map((card, idx) => (
+                    <ChatIndicatorCard key={idx} data={card} />
+                  ))}
+                </div>
+              ) : m.progress ? (
+              // ✅ 新增：进度气泡
                 <ProgressBubble
                   steps={m.progress}
                   raw={m.progressRaw}
+                  showRaw={false}
                   collapsed={m.collapsed}
                   onToggle={()=>{
                     const idx = i;
-                    setMessages((arr)=> {
-                      const cp = [...arr];
-                      const msg = cp[idx];
-                      if (msg) cp[idx] = { ...msg, collapsed: !msg.collapsed };
-                      return cp;
-                    });
-                  }}
-                />
-              ) : (
-                <div className="max-w-none">
-                  {m.content && (
-                    <div className="prose prose-sm prose-gray">
+                      setMessages((arr)=> {
+                        const cp = [...arr];
+                        const msg = cp[idx];
+                        if (msg) cp[idx] = { ...msg, collapsed: !msg.collapsed };
+                        return cp;
+                      });
+                    }}
+                  />
+                ) : (
+                  <div className="max-w-none">
+                    {m.content && (
+                      <div className="prose prose-base prose-gray max-w-none prose-h3:text-gray-900 prose-h3:mt-4 prose-h3:mb-2 prose-strong:text-gray-900">
                       <Markdown_2 content={m.content} />
-                    </div>
-                  )}
-                  {m.chart && <div className="mt-3"><AutoChart cfg={m.chart} /></div>}
-                </div>
-              )}
+                      </div>
+                    )}
+                    {m.chart && <div className="mt-3"><AutoChart cfg={m.chart} /></div>}
+                  </div>
+                )}
+
 
                 {/* [ADD] dataquery 调试条（存在 debug 时显示） */}
                 {m.debug && (
@@ -2426,13 +2520,29 @@ if (indicatorCard) {
                   </div>
                 )}
 
-
-
-
+                {/* 推荐追问（如有） */}
+                {Array.isArray(m.suggestions) && m.suggestions.length > 0 && (
+                  <div className="mt-3">
+                    <div className="text-xs font-medium text-gray-500 mb-1">推荐追问</div>
+                    <div className="flex flex-wrap gap-2">
+                      {m.suggestions.map((q, idx) => (
+                        <button
+                          key={idx}
+                          onClick={() => setInputQuery(q)}
+                          onDoubleClick={() => handleSendMessage(q)}
+                          className="inline-flex items-center px-2.5 py-1.5 rounded-full border border-gray-300 text-xs text-gray-700 bg-white hover:bg-gray-50"
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <p className={`text-xs mt-2 ${m.role === "user" ? "text-blue-100" : "text-gray-500"}`}>
                   {new Date(m.timestamp).toLocaleTimeString()}
                 </p>
+
               </div>
             </div>
           </div>

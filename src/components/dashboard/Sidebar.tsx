@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { X, BarChart3, TrendingUp, Brain, FileText, Settings, Home, LogOut } from 'lucide-react';
+import { X, BarChart3, TrendingUp, Brain, FileText, Settings, Home, LogOut, FileSpreadsheet } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { isDemoMode } from '@/lib/utils';
 import toast from 'react-hot-toast';
@@ -14,13 +14,16 @@ const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
   const location = useLocation();
   const { signOut, user } = useAuth();
 
-  const navigation = [
+    const navigation = [
     { name: '综合概览', href: '/dashboard/overview', icon: Home },
     { name: '模拟分析', href: '/dashboard/simulation', icon: TrendingUp },
+    { name: '模拟分析2', href: '/dashboard/simulation2', icon: TrendingUp },
     { name: '财务分析', href: '/dashboard/analysis', icon: Brain },
+    { name: '预算管理', href: '/dashboard/budget', icon: FileSpreadsheet },
     { name: '报告生成', href: '/dashboard/reports', icon: FileText },
     { name: '数据管理', href: '/dashboard/admin', icon: Settings },
   ];
+
 
   const handleSignOut = async () => {
     try {

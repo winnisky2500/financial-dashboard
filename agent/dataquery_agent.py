@@ -803,7 +803,11 @@ class QueryResp(BaseModel):
 
 @app.post("/metrics/query", response_model=QueryResp)
 def metrics_query(req: QueryReq, _=Depends(require_token)):
+    print("[dataquery] REQ:", req.dict(), flush=True)   # ★新增
     steps: List[Dict[str,Any]] = []
+    def log(title: str, status: str, **kw):
+        # 统一的进度记录，前端只用 title/status 即可
+        steps.append({"title": title, "status": status, **kw})
 
     # —— 显式 quarter 先规范化
     quarter_int_explicit = _parse_quarter_to_int(req.quarter)
@@ -811,8 +815,12 @@ def metrics_query(req: QueryReq, _=Depends(require_token)):
     # —— 是否需要 LLM（缺任一项就需要）
     need_llm = not (req.metric and req.company and req.year and quarter_int_explicit)
 
+    # 先把“意图识别”这一步写进去：纯取数= dataquery；否则 = deep
+    log("分析问题中（意图识别）", "done", intent=("deep" if need_llm else "dataquery"))
+
     # —— 调试容器
     dbg: Dict[str, Any] = {"need_llm": need_llm}
+
 
     # —— 只有缺项时才调 LLM/正则
     parsed: Dict[str,Any] = {}
@@ -884,6 +892,7 @@ def metrics_query(req: QueryReq, _=Depends(require_token)):
         "quarter": q_label,
         "scenario": req.scenario or "actual",
     }
+    print("[dataquery] RESOLVED:", resolved, flush=True)  # ★新增
     dbg["resolved"] = resolved
     # 6) 优先直取（并携带指标卡）
     row = fetch_metric_row(canon_company, int(year), int(quarter_int), canon_metric)
@@ -897,6 +906,9 @@ def metrics_query(req: QueryReq, _=Depends(require_token)):
         dbg["fetch_ok"] = True
         dbg["fetch_mode"] = "direct"
         dbg["source"] = row.get("source")
+        # 把“取数/生成结果”记录进度
+        log("取数中", "done")
+        log("生成结果中", "done")
         return QueryResp(
             resolved=resolved,
             value={"metric_name": canon_metric, "metric_value": cur_val, "unit": meta.get("unit")},
@@ -938,6 +950,10 @@ def metrics_query(req: QueryReq, _=Depends(require_token)):
         dbg["fetch_ok"] = True
         dbg["fetch_mode"] = "formula"
         expr, substituted, table = make_expression(canon_metric, result_var, steps_values, variables, compute)
+        
+        log("取数中", "done")
+        log("生成结果中", "done")       
+
         return QueryResp(
             resolved=resolved,
             formula={"expression": expr, "substituted": substituted, "result": result, "result_str": fmt_num(result), "table": table},

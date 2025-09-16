@@ -1,6 +1,7 @@
 import { supabase, isDemoMode, getDemoFinancialIndicators, getDemoPolicyNews, getDemoSubsidiaries, getDemoSectors } from './supabase';
 import { createClient } from '@supabase/supabase-js';
 
+
 // 数据类型定义
 export interface ReportTemplateRow {
   id: string;
@@ -233,6 +234,61 @@ export interface MonteCarloParams {
   seed?: number;
 }
 
+// ==== 上传文件（report_uploads）表的行 ====
+export interface ReportUploadRow {
+  id: string;
+  user_id: string;
+  file_name: string;
+  mime_type: string | null;
+  size_bytes: number | null;
+  bucket: string;      // 'uploads'
+  path: string;        // {user_id}/{ts}-{filename}
+  meta: any;
+  created_at: string;
+  signedUrl?: string;  // 便于预览（私有桶）
+}
+
+// ==== 自然语言报告 Agent 请求/响应 ====
+export interface FreeReportRequest {
+  prompt: string;
+  selected_file_ids: string[];
+  allow_web_search?: boolean;
+  language?: 'zh' | 'en';
+}
+
+export interface FreeReportParams {
+  prompt: string;
+  language?: 'zh' | 'en';
+  allow_web_search?: boolean;
+  selected_file_ids?: string[];
+  template_text?: string;
+  template_file_id?: string;
+  meta?: Record<string, any>;
+}
+
+export interface FreeReportResult {
+  job_id: string;
+  generated_at: string;
+  content_md: string;
+  attachments_used?: string[];
+  web_refs?: Array<Record<string, any>>;
+}
+
+export interface FreeReportResponse {
+  job_id: string;
+  generated_at: string;
+  content_md: string;
+  attachments_used: string[];
+  web_refs: Array<{ title: string; url: string; summary: string }>;
+}
+
+// ==== 美化 Agent 响应 ====
+export interface BeautifyResponse {
+  html_download_url?: string;
+  docx_download_url?: string;
+  pdf_download_url?: string;
+}
+
 /**
  * 获取财务指标数据
  */
@@ -369,6 +425,68 @@ export async function getPolicyNews(): Promise<PolicyNewsItem[]> {
   }
 }
 
+// ==== 上传到 Storage + 写入 report_uploads ====
+export async function uploadReportFile(file: File): Promise<ReportUploadRow> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('未登录，无法上传');
+
+  const bucket = 'uploads';
+  const objectKey = `${user.id}/${Date.now()}-${file.name}`;
+
+  // 1) 存储
+  const up = await supabase.storage.from(bucket).upload(objectKey, file, {
+    cacheControl: '3600',
+    upsert: false,
+    contentType: file.type || 'application/octet-stream',
+  });
+  if (up.error) throw up.error;
+
+  // 2) 表记录
+  const ins = await supabase.from('report_uploads')
+    .insert({
+      user_id: user.id,
+      file_name: file.name,
+      mime_type: file.type || null,
+      size_bytes: file.size,
+      bucket, path: objectKey,
+      meta: {},
+    })
+    .select('*').single();
+  if (ins.error) throw ins.error;
+
+  // 3) 签名 URL（私有桶）
+  const signed = await supabase.storage.from(bucket).createSignedUrl(objectKey, 3600);
+  return { ...(ins.data as ReportUploadRow), signedUrl: signed.data?.signedUrl };
+}
+
+// ==== 列出本人上传 ====
+export async function listReportUploads(): Promise<ReportUploadRow[]> {
+  // 允许未登录也能看到（配合上面的“select all”策略）
+  const { data, error } = await supabase
+    .from('report_uploads')
+    .select('id,user_id,file_name,mime_type,size_bytes,bucket,path,meta,created_at')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+
+  // 不生成 signedUrl；仅返回行数据即可
+  const rows = (data || []) as ReportUploadRow[];
+  rows.forEach(r => { (r as any).signedUrl = undefined; });
+  return rows;
+}
+
+
+// ==== 删除（Storage + 表） ====
+export async function deleteReportUpload(id: string): Promise<void> {
+  const { data, error } = await supabase.from('report_uploads').select('*').eq('id', id).single();
+  if (error) throw error;
+  const row = data as ReportUploadRow;
+
+  const rm = await supabase.storage.from(row.bucket).remove([row.path]);
+  if (rm.error) throw rm.error;
+
+  const del = await supabase.from('report_uploads').delete().eq('id', id);
+  if (del.error) throw del.error;
+}
 
 /**
  * 获取子公司数据
@@ -833,6 +951,59 @@ export async function callReportGenerationAI(query: string): Promise<any> {
   }
 }
 
+// ==== 生成自由报告 ====
+export async function generateFreeReport(
+  params: FreeReportParams
+): Promise<FreeReportResult> {
+  // ✅ 命中 freereport_agent 的 /freereport/generate
+  const url = FREE_BASE ? `${FREE_BASE}/freereport/generate` : `/freereport/generate`;
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      // ✅ 与后端 auth_check 对应：Authorization 或 X-Agent-Token 都可（Bearer <token>）
+      'Authorization': `Bearer ${FREE_TOKEN}`,
+      // 'X-Agent-Token': `Bearer ${FREE_TOKEN}`,
+    },
+    body: JSON.stringify(params),
+  });
+
+  if (!res.ok) {
+    const msg = await res.text().catch(() => `${res.status}`);
+    throw new Error(msg || `HTTP ${res.status}`);
+  }
+  return await res.json();
+}
+
+// ==== 美化导出 ====
+export async function beautifyMarkdown(markdown: string, extra?: {
+  instructions?: string; language?: 'zh' | 'en'; style?: any;
+}): Promise<BeautifyResponse> {
+  if (!BEAUTIFY_URL) throw new Error('缺少 VITE_BEAUTIFY_AGENT_URL');
+
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (REPORT_AGENT_TOKEN) headers['Authorization'] = `Bearer ${REPORT_AGENT_TOKEN}`;
+
+  const payload = {
+    markdown,
+    language: extra?.language ?? 'zh',
+    instructions: extra?.instructions ?? '保持事实准确，优化结构，保留 ```echarts``` 图表；生成 HTML/DOCX/PDF 下载。',
+    style: extra?.style ?? {
+      font_family: 'Inter, "Microsoft YaHei", system-ui, -apple-system, Segoe UI, sans-serif',
+      theme: 'light', base_font_size: 16, line_height: 1.75, content_width_px: 920,
+    },
+  };
+
+  const resp = await fetch(`${BEAUTIFY_URL}/beautify/run`, {
+    method: 'POST',
+    headers, body: JSON.stringify(payload),
+  });
+  if (!resp.ok) throw new Error(await resp.text());
+  return await resp.json() as BeautifyResponse;
+}
+
+
 // 智能报告生成相关类型定义
 export interface ReportGenerationParams {
   reportType: string; // e.g. 'annual_financial'
@@ -902,6 +1073,24 @@ export interface DocumentExportResult {
     [key: string]: any;
   };
 }
+
+// ==== 自然语言报告 + 美化 agent 的环境变量（新增） ====
+const FREE_AGENT_URL   = import.meta.env.VITE_FREE_REPORT_AGENT_URL;     // 例如 http://127.0.0.1:18060
+const FREE_AGENT_TOKEN = import.meta.env.VITE_FREE_REPORT_AGENT_TOKEN;   // 例如 dev-secret-01
+const BEAUTIFY_URL     = import.meta.env.VITE_BEAUTIFY_AGENT_URL;        // 例如 http://127.0.0.1:8010
+const REPORT_AGENT_TOKEN = import.meta.env.VITE_REPORT_AGENT_TOKEN;      // 你已有，用于 beautify
+
+// —— 模板驱动的 report_agent（常走 /report/...，通常端口 8010）
+const REPORT_BASE =
+  ((import.meta as any).env?.VITE_REPORT_AGENT_URL as string || '').replace(/\/$/, '');
+const REPORT_TOKEN =
+  (import.meta as any).env?.VITE_REPORT_AGENT_TOKEN || 'dev-secret-01';
+
+// —— 自然语言自由生成的 freereport_agent（走 /freereport/...，你的端口 18060）
+const FREE_BASE =
+  ((import.meta as any).env?.VITE_FREE_REPORT_AGENT_URL as string || '').replace(/\/$/, '');
+const FREE_TOKEN =
+  (import.meta as any).env?.VITE_FREE_REPORT_AGENT_TOKEN || 'dev-secret-01';
 
 /**
  * 智能报告生成

@@ -9,6 +9,8 @@ import Analysis from './Analysis';
 import Reports from './Reports';
 import Admin from './Admin';
 import PolicyDetail from './components/PolicyDetail';
+import SimulationV2 from './SimulationV2';
+import Budget from './Budget.tsx';
 
 const Dashboard: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -32,7 +34,9 @@ const Dashboard: React.FC = () => {
               <Route path="/" element={<Overview />} />
               <Route path="/overview" element={<Overview />} />
               <Route path="/simulation" element={<Simulation />} />
+              <Route path="/simulation2" element={<SimulationV2 />} />
               <Route path="/analysis" element={<Analysis />} />
+              <Route path="/budget" element={<Budget />} />
               <Route path="/reports" element={<Reports />} />
               <Route path="/admin" element={<Admin />} />
               <Route path="/policy-detail" element={<PolicyDetail />} />
